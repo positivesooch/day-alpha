@@ -3,12 +3,15 @@
 
     pyinstaller --noconfirm installer/DayTraderBot.spec
 
-Builds dist/DayTraderBot/ (one folder): DayTraderBot.exe plus the pack's
-twelve skill folders and the fixtures the reel replay needs, under pack/.
-The exe is the Python that runs the tool scripts (bot.py answers --tool),
-so the installed app needs no Python on the machine. One folder, not one
-file: the bot starts the tool scripts as subprocesses many times a session,
-and a one-file exe would unpack itself on every one of them.
+Builds dist/DayTraderBot/ (one folder) with two programs that share one
+_internal/: DayTraderBot.exe, the window (no console), and
+DayTraderBotCLI.exe, the console program the window drives and the one you
+type commands at. The console exe is also the Python that runs the pack's
+tool scripts (bot.py answers --tool), so the installed app needs no Python
+on the machine. The pack's twelve skill folders and the fixtures the reel
+replay needs sit under _internal/pack/. One folder, not one file: the bot
+starts the tool scripts as subprocesses many times a session, and a one-file
+exe would unpack itself on every one of them.
 """
 
 import glob
@@ -17,6 +20,7 @@ import os
 SPEC_DIR = os.path.dirname(os.path.abspath(SPEC))
 ROOT = os.path.dirname(SPEC_DIR)
 ENTRY = os.path.join(ROOT, "trader-bot", "bot.py")
+GUI_ENTRY = os.path.join(ROOT, "trader-bot", "gui.py")
 
 SKILLS = ["trader-scanner", "trader-news", "trader-entry", "trader-exit", "trader-timemachine",
           "trader-risk", "trader-budget", "trader-broker", "trader-alerts", "trader-analyst",
@@ -51,7 +55,9 @@ hiddenimports = [
     "xml.etree.ElementTree", "zipfile", "zlib", "ssl", "http.client", "http.cookiejar",
 ]
 
-a = Analysis(
+EXCLUDES = ["unittest", "pydoc", "doctest", "test", "distutils", "setuptools", "pip"]
+
+cli_a = Analysis(
     [ENTRY],
     pathex=[ROOT],
     binaries=[],
@@ -59,17 +65,29 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "unittest", "pydoc", "doctest", "test", "distutils", "setuptools", "pip"],
+    excludes=EXCLUDES + ["tkinter"],
     noarchive=False,
 )
-pyz = PYZ(a.pure)
+gui_a = Analysis(
+    [GUI_ENTRY],
+    pathex=[ROOT, os.path.join(ROOT, "trader-bot")],
+    binaries=[],
+    datas=[],
+    hiddenimports=hiddenimports + ["tkinter", "tkinter.ttk", "tkinter.scrolledtext", "tkinter.messagebox"],
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=EXCLUDES,
+    noarchive=False,
+)
+MERGE((cli_a, "DayTraderBotCLI", "DayTraderBotCLI"), (gui_a, "DayTraderBot", "DayTraderBot"))
 
-exe = EXE(
-    pyz,
-    a.scripts,
+cli_pyz = PYZ(cli_a.pure)
+cli_exe = EXE(
+    cli_pyz,
+    cli_a.scripts,
     [],
     exclude_binaries=True,
-    name="DayTraderBot",
+    name="DayTraderBotCLI",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -80,10 +98,30 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
+gui_pyz = PYZ(gui_a.pure)
+gui_exe = EXE(
+    gui_pyz,
+    gui_a.scripts,
+    [],
+    exclude_binaries=True,
+    name="DayTraderBot",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,
+    disable_windowed_traceback=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
 coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
+    cli_exe,
+    cli_a.binaries,
+    cli_a.datas,
+    gui_exe,
+    gui_a.binaries,
+    gui_a.datas,
     strip=False,
     upx=False,
     upx_exclude=[],

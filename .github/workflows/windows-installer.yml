@@ -33,8 +33,9 @@ jobs:
         run: |
           $setup = Get-ChildItem installer\Output\DayTraderBot-Setup-*.exe | Select-Object -First 1
           Start-Process -Wait -FilePath $setup.FullName -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$env:RUNNER_TEMP\DTB"
-          & "$env:RUNNER_TEMP\DTB\DayTraderBot.exe" --version
-          & "$env:RUNNER_TEMP\DTB\DayTraderBot.exe" replay --fixtures --fresh --quiet
+          & "$env:RUNNER_TEMP\DTB\DayTraderBotCLI.exe" --version
+          & "$env:RUNNER_TEMP\DTB\DayTraderBotCLI.exe" replay --fixtures --fresh --quiet
+          if (-not (Test-Path "$env:RUNNER_TEMP\DTB\DayTraderBot.exe")) { throw "no DayTraderBot.exe installed" }
       - uses: actions/upload-artifact@v4
         with:
           name: DayTraderBot-Setup

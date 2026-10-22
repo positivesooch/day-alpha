@@ -4,14 +4,15 @@
 
 .DESCRIPTION
   1. pip installs PyInstaller (into the current Python; a venv is fine).
-  2. PyInstaller freezes trader-bot\bot.py plus the pack into dist\DayTraderBot\.
+  2. PyInstaller freezes trader-bot\bot.py (console: DayTraderBotCLI.exe) and trader-bot\gui.py
+     (window: DayTraderBot.exe) plus the pack into dist\DayTraderBot\.
   3. Inno Setup (ISCC.exe) wraps that folder into installer\Output\DayTraderBot-Setup-<version>.exe.
 
   Needs: Python 3.8+ on PATH, and Inno Setup 6 (https://jrsoftware.org/isinfo.php,
   or `winget install JRSoftware.InnoSetup`, or `choco install innosetup`).
 
 .PARAMETER SkipInstaller
-  Stop after PyInstaller: dist\DayTraderBot\DayTraderBot.exe is enough to run or zip.
+  Stop after PyInstaller: dist\DayTraderBot\ is enough to run or zip.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File installer\build.ps1
@@ -43,13 +44,14 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 Write-Host "`n== Smoke test: the frozen app replays the reel day" -ForegroundColor Cyan
 $env:DAYTRADERBOT_HOME = Join-Path $env:TEMP "DayTraderBot-smoke"
 if (Test-Path $env:DAYTRADERBOT_HOME) { Remove-Item -Recurse -Force $env:DAYTRADERBOT_HOME }
-& "dist\DayTraderBot\DayTraderBot.exe" --version
-& "dist\DayTraderBot\DayTraderBot.exe" replay --fixtures --fresh --mode auto --quiet
+& "dist\DayTraderBot\DayTraderBotCLI.exe" --version
+& "dist\DayTraderBot\DayTraderBotCLI.exe" replay --fixtures --fresh --mode auto --quiet
+if (-not (Test-Path "dist\DayTraderBot\DayTraderBot.exe")) { throw "the windowed DayTraderBot.exe was not built" }
 if ($LASTEXITCODE -ne 0) { throw "the frozen app failed its replay" }
 Remove-Item Env:\DAYTRADERBOT_HOME
 
 if ($SkipInstaller) {
-    Write-Host "`nDone: dist\DayTraderBot\DayTraderBot.exe (installer skipped)" -ForegroundColor Green
+    Write-Host "`nDone: dist\DayTraderBot\ (DayTraderBot.exe, DayTraderBotCLI.exe; installer skipped)" -ForegroundColor Green
     exit 0
 }
 
