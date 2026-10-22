@@ -16,6 +16,12 @@ past day the same setup fired, and tells you the honest odds.
 And no trade goes through until you say yes. Nothing in this pack can place
 an order on its own. Paper trading is the default.
 
+This fork adds a twelfth piece, **`/trader-bot`**: the eleven skills run as
+one loop, bar by bar, with a built-in paper broker, an Alpaca connection, and
+a replay that runs a recorded session in a second. Dry-run by default, it
+asks you for a yes in confirm mode, and it trades hands-off only on a paper
+account. See [The bot](#the-bot) below.
+
 > **Looking for the original Trader skill?** Copy an investor's 13F, the
 > stock screener, tax lots and rebalancing live in
 > [github.com/Jakeschincariol/trader-skill](https://github.com/Jakeschincariol/trader-skill).
@@ -72,6 +78,7 @@ or in the `SEC_USER_AGENT` environment variable.
 | `/trader-alerts` | Price Alerts | Rings when a price, a stop or the opening bell hits. |
 | `/trader-analyst` | Earnings Analyst | Reads earnings reports and sums up what changed. |
 | `/trader-pelosi` | Pelosi Tracker | Reads Congress's stock-trade disclosures the minute they are filed. |
+| `/trader-bot` | Trading Bot | Runs the pipeline above as one loop: scan, time the entry, plan the exit, replay the odds, size, check, place. Paper by default. |
 
 ## How to use it
 
@@ -152,6 +159,60 @@ for the 60 days to October 19 2026, the 10:15 AM opening-range scan, Yahoo's
 TSLA headlines that morning, the House Clerk's 2026 index, real PTR text and
 real XBRL facts. They reproduce every number in the example above.
 
+## The bot
+
+`/trader-bot` is the pipeline above with a clock, a broker and a log. It
+calls the same scripts, with `--json`, in the same order, every bar:
+
+```bash
+python3 trader-bot/bot.py init                                 # trader/config.json + trader/bot.json
+python3 trader-bot/bot.py replay --fixtures                    # the reel's day, offline, dry-run
+python3 trader-bot/bot.py replay --fixtures --mode auto        # same day, the sim broker takes the trade
+python3 trader-bot/bot.py replay --fixtures --scan --mode auto # the scanner picks from 231 recorded charts
+python3 trader-bot/bot.py run --symbols TSLA,AAPL              # today, live, dry-run: nothing is placed
+python3 trader-bot/bot.py run --mode confirm                   # live; you type yes or no per order
+python3 trader-bot/bot.py run --mode auto --broker alpaca      # Alpaca PAPER account, hands off
+python3 trader-bot/bot.py status --events 20                   # the session so far
+```
+
+What the replay of the reel prints, in auto mode:
+
+```
+10:15  TSLA: TRIGGERED 10:15 AM at $364.18 (10:10 bar closed above $362.18, +0.55%)
+10:15  TSLA: news: 16 headlines, tagged deal, earnings, macro
+10:15  TSLA: plan: entry $364.18, stop $358.32 (opening-range midpoint), target $370.04 (1R), $5.86 a share at risk, flat by 15:55
+10:15  TSLA: time machine: target first 29.4%, stop first 25.5%, open at the close 45.1% (10000 replays); history: 33 of 59 fired, 13 target / 15 stop / 5 close. Close to a coin flip.
+10:15  TSLA: budget: 8 shares ($2,913.44), stop-loss 358.32, take-profit 370.04, max loss $46.88
+10:15  TSLA: risk: PASS. max loss $46.88 (limit $50), reward:risk 1.00 (min 1), 0 of 3 trades today
+10:15  TSLA: READY: BUY 8 TSLA, market, good for today / stop-loss 358.32 / take-profit 370.04 [PAPER account, sim]
+10:15  TSLA: auto mode on a PAPER account: the bot says yes to this one order
+10:15  TSLA: FILLED buy 8 at $364.18 (sim-1), bracket at the broker: stop-loss $358.32, take-profit $370.04
+```
+
+**Three modes.** `dry-run` (the default) runs everything and places nothing.
+`confirm` shows the ticket and asks you to type yes for that one order;
+`ticket.py approve` decides whether it was a real yes. `auto` says yes
+itself, writes "nobody typed this" into the broker log, and works only while
+`trader/config.json` says `"paper": true`: on a live account it refuses to
+start.
+
+**Two brokers.** `sim` is a paper broker inside the bot that fills at the
+latest price and walks the bracket bar by bar (when one bar touches both the
+stop and the target, the stop wins). `alpaca` talks to Alpaca's REST API with
+`ALPACA_API_KEY` and `ALPACA_SECRET_KEY` from the environment, paper unless
+your config says otherwise.
+
+**Gates in `trader/bot.json`.** A trigger older than `stale_minutes` is a
+different trade and is skipped. News tags in `block_tags` (say,
+`["earnings"]`) skip the trade. The Time Machine's edge (target first minus
+stop first) must reach `min_edge_pct`, and the setup must have fired at least
+`min_history_triggers` times. Then the budget, trader-risk and the ticket
+decide as they always do. Every skip, block and fill is in
+`trader/state/bot.json`, and `bot.py status` reads it back.
+
+Everything in "Fine print" applies twice over to a bot. Replay first, then
+dry-run, then confirm, then auto on paper. The bot never flips `"paper"`.
+
 ## Fine print
 
 **Not financial advice.** This is software that reads public data and does
@@ -210,6 +271,7 @@ trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
 trader-analyst/     SKILL.md, facts.py, metrics.example.json
 trader-pelosi/      SKILL.md, ptr.py
+trader-bot/         SKILL.md, bot.py, bot.example.json
 tests/              unittest suite + offline fixtures
 ```
 
