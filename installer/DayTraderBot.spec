@@ -53,7 +53,19 @@ hiddenimports = [
     "html.parser", "io", "json", "math", "random", "re", "runpy", "shutil", "statistics", "subprocess",
     "time", "urllib", "urllib.error", "urllib.parse", "urllib.request", "xml", "xml.etree",
     "xml.etree.ElementTree", "zipfile", "zlib", "ssl", "http.client", "http.cookiejar",
+    "mt5link",
 ]
+
+# MetaTrader 5 support (prop-firm accounts) rides along when the official
+# package is installed in the building Python; it exists for Windows only, so a
+# build elsewhere simply ships without it and the bot says so when asked for mt5.
+try:
+    import MetaTrader5  # noqa: F401
+    import numpy  # noqa: F401  (MetaTrader5 returns its rates as numpy arrays)
+    hiddenimports += ["MetaTrader5", "numpy"]
+    print("DayTraderBot.spec: bundling MetaTrader5 %s" % getattr(MetaTrader5, "__version__", ""))
+except ImportError:
+    print("DayTraderBot.spec: MetaTrader5 not installed in this Python; building without it")
 
 EXCLUDES = ["unittest", "pydoc", "doctest", "test", "distutils", "setuptools", "pip"]
 

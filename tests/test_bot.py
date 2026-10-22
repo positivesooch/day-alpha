@@ -425,6 +425,8 @@ class App(unittest.TestCase):
         self.assertIn("console=True", spec)
         self.assertIn("console=False", spec)
         self.assertIn("gui.py", spec)
+        self.assertIn('"mt5link"', spec)
+        self.assertIn("MetaTrader5", spec)
         with open(os.path.join(inst, "DayTraderBot.iss"), encoding="utf-8") as fh:
             iss = fh.read()
         self.assertIn('#define MyAppVersion "%s"' % bot.VERSION, iss)
@@ -437,6 +439,7 @@ class App(unittest.TestCase):
         self.assertIn("installer\\DayTraderBot.spec", ps1)
         self.assertIn("DayTraderBot.iss", ps1)
         self.assertIn("DayTraderBotCLI.exe\" replay --fixtures --fresh --mode auto", ps1)
+        self.assertIn("pip install --quiet --upgrade MetaTrader5", ps1)
         self.assertTrue(os.path.exists(os.path.join(ROOT, ".github", "workflows", "windows-installer.yml")))
 
 

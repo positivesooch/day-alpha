@@ -26,6 +26,15 @@ Broker keys: for Alpaca, set ALPACA_API_KEY and ALPACA_SECRET_KEY as
 environment variables (paper keys from the Alpaca dashboard). The program
 never asks for them, stores them or prints them.
 
+MetaTrader 5 (prop firms): choose the "mt5" broker to trade a funded or
+challenge account through the MetaTrader 5 terminal installed on this
+computer. Keep the terminal open and logged in (or put the password in the
+MT5_PASSWORD environment variable), name the firm's symbols in bot.json
+(TSLA -> TSLA.US and so on), and set the firm's daily loss and drawdown
+limits there. The bot enforces them with a buffer, stops for the day when
+equity nears one, and closes what it opened. A breached rule ends a funded
+account: run the challenge account first.
+
 Not financial advice. This is software that reads free public data and does
 arithmetic. Most people who day trade lose money. You can lose money. Paper
 trade first, and decide for yourself.

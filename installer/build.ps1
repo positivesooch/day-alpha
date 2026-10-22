@@ -3,7 +3,8 @@
   Build DayTraderBot-Setup-<version>.exe on Windows.
 
 .DESCRIPTION
-  1. pip installs PyInstaller (into the current Python; a venv is fine).
+  1. pip installs PyInstaller and MetaTrader5 (into the current Python; a venv is fine). MetaTrader5
+     is MetaQuotes' own package: with it bundled, the installed app can trade a prop-firm MT5 account.
   2. PyInstaller freezes trader-bot\bot.py (console: DayTraderBotCLI.exe) and trader-bot\gui.py
      (window: DayTraderBot.exe) plus the pack into dist\DayTraderBot\.
   3. Inno Setup (ISCC.exe) wraps that folder into installer\Output\DayTraderBot-Setup-<version>.exe.
@@ -35,6 +36,8 @@ Write-Host "Day Trader Bot $Version" -ForegroundColor Cyan
 & $Python --version
 & $Python -m pip install --quiet --upgrade pyinstaller
 if ($LASTEXITCODE -ne 0) { throw "pip install pyinstaller failed" }
+& $Python -m pip install --quiet --upgrade MetaTrader5
+if ($LASTEXITCODE -ne 0) { Write-Warning "pip install MetaTrader5 failed; building without MT5 support" }
 
 Write-Host "`n== PyInstaller" -ForegroundColor Cyan
 if (Test-Path "dist\DayTraderBot") { Remove-Item -Recurse -Force "dist\DayTraderBot" }
