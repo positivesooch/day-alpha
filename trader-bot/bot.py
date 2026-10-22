@@ -9,14 +9,16 @@ pack's own tools in the pack's own order, every bar:
 Each stage is the real skill script, called with --json, so every number the
 bot acts on is one the skills would have shown you. The bot adds three things
 the skills do not have: a clock that waits for the next bar, a broker that
-places the ticket (a built-in paper simulator, or Alpaca's REST API), and a
-replay that runs a whole recorded session in a second.
+places the ticket (a built-in paper simulator, Alpaca's REST API, or a
+MetaTrader 5 terminal with a prop firm's rules enforced on top; see
+mt5link.py), and a replay that runs a whole recorded session in a second.
 
 Execution modes, from safest to least:
 
     dry-run   the full pipeline up to the READY ticket, nothing is placed (default)
     confirm   the ticket is shown, you type yes or no for that one order
     auto      the bot says yes itself: PAPER accounts only, it refuses on live
+              (a REAL MetaTrader 5 account needs mt5.allow_auto_on_real as well)
 
 Nothing here is financial advice. Most people who day trade lose money.
 """
@@ -60,6 +62,10 @@ BOT_EXAMPLE = os.path.join(HERE, "bot.example.json")
 FIXTURES = os.path.join(PACK, "tests", "fixtures")
 README = os.path.join(BUNDLE if FROZEN else PACK, "README.md")
 
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import mt5link  # noqa: E402  (the MetaTrader 5 link; standard library until the bot connects)
+
 
 def default_home():
     """Where trader/ lives when no --dir is given: the current folder for the
@@ -77,7 +83,7 @@ CHART_URL = "https://query2.finance.yahoo.com/v8/finance/chart/%s?range=1d&inter
 ALPACA_PAPER = "https://paper-api.alpaca.markets"
 ALPACA_LIVE = "https://api.alpaca.markets"
 MODES = ("dry-run", "confirm", "auto")
-BROKERS = ("sim", "alpaca")
+BROKERS = ("sim", "alpaca", "mt5")
 DONE = {"expired", "skipped", "blocked", "dry-run", "declined", "failed", "open", "closed", "no-order"}
 
 DEFAULTS = {
@@ -90,6 +96,7 @@ DEFAULTS = {
     "timemachine": {"enabled": True, "replays": 10000, "seed": 19, "min_edge_pct": 0.0,
                     "min_history_triggers": 0, "required": True},
     "execution": {"mode": "dry-run", "broker": "sim", "max_open_positions": 1, "fill_wait_seconds": 60},
+    "mt5": json.loads(json.dumps(mt5link.DEFAULTS)),
     "poll_seconds": 20,
     "bar_grace_seconds": 25,
 }
@@ -97,6 +104,26 @@ DEFAULTS = {
 
 class BotError(Exception):
     pass
+
+
+class MT5Bridge(object):
+    """The MetaTrader 5 link's objects, with its MT5Error turned into the bot's
+    BotError so every handler in here sees one exception type."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    def __getattr__(self, name):
+        attr = getattr(self.inner, name)
+        if not callable(attr):
+            return attr
+
+        def call(*args, **kw):
+            try:
+                return attr(*args, **kw)
+            except mt5link.MT5Error as e:
+                raise BotError(str(e))
+        return call
 
 
 # ---------------------------------------------------------------- time (New York, no tz files)
@@ -564,7 +591,7 @@ class AlpacaBroker(object):
 
 class Bot(object):
     def __init__(self, workdir, bot_cfg, mode=None, broker=None, bars=None, history=None, news_dir=None,
-                 scan_offline=None, replay=False, reply_fn=None, out=None, quiet=False):
+                 scan_offline=None, replay=False, reply_fn=None, out=None, quiet=False, mt5=None):
         self.workdir = os.path.abspath(workdir)
         self.trader = os.path.join(self.workdir, "trader")
         self.cfg = read_json(os.path.join(self.trader, "config.json"),
@@ -578,16 +605,24 @@ class Bot(object):
         if self.broker_name not in BROKERS:
             raise BotError("broker must be one of %s" % ", ".join(BROKERS))
         self.paper = bool(self.cfg.get("paper", True))
-        if self.mode == "auto" and not self.paper:
+        auto_on_real = self.broker_name == "mt5" and bool(self.bot["mt5"].get("allow_auto_on_real"))
+        if self.mode == "auto" and not self.paper and not auto_on_real:
             raise BotError("auto mode is for paper accounts only: trader/config.json says \"paper\": false. "
-                           "Use --mode confirm and say yes to each order yourself, or set paper back to true.")
-        if self.broker_name == "alpaca" and replay:
-            raise BotError("a replay runs on the built-in sim broker, not Alpaca")
+                           "Use --mode confirm and say yes to each order yourself, or set paper back to true"
+                           + (". A REAL MetaTrader 5 account needs mt5.allow_auto_on_real true in trader/bot.json "
+                             "as well, on purpose." if self.broker_name == "mt5" else "."))
+        if self.broker_name != "sim" and replay:
+            raise BotError("a replay runs on the built-in sim broker, not %s"
+                           % {"alpaca": "Alpaca", "mt5": "MetaTrader 5"}[self.broker_name])
         self.replay = replay
         self.reply_fn = reply_fn or (lambda prompt: input(prompt))
         self.out = out or sys.stdout
         self.quiet = quiet
         self.now = None
+        self.account_info = None
+        self.guard = None
+        if self.broker_name == "mt5":
+            self.broker, bars, history = self._connect_mt5(bars, history, mt5)
         self.bars = bars or BarSource(None, self.workdir, self.bot["setup"]["interval"])
         self.history = history or HistorySource(None)
         self.news_dir = news_dir
@@ -597,9 +632,35 @@ class Bot(object):
         self.state = read_json(self.state_path, required=False) or {}
         if self.broker_name == "sim":
             self.broker = SimBroker(self.bars)
-        else:
+        elif self.broker_name == "alpaca":
             self.broker = AlpacaBroker(self.paper)
         self.last_scan = None
+
+    def _connect_mt5(self, bars, history, mt5):
+        """The MetaTrader 5 terminal as broker (and, unless told otherwise, as the
+        source of candles). The account's kind is checked against the config:
+        a config that says paper may only drive a demo or contest account, which
+        is what prop-firm challenge and funded logins report."""
+        mcfg = self.bot["mt5"]
+        try:
+            link = mt5link.Link(mcfg, mt5=mt5)
+            acct = link.connect()
+        except mt5link.MT5Error as e:
+            raise BotError(str(e))
+        self.account_info = acct
+        if self.paper and acct["kind"] == "real":
+            link.shutdown()
+            raise BotError("trader/config.json says \"paper\": true, but MetaTrader 5 login %s at %s is a REAL "
+                           "account. The bot will not treat real money as paper. Set \"paper\": false to run it in "
+                           "confirm mode, or log in to the demo / challenge account instead."
+                           % (acct.get("login"), acct.get("server")))
+        broker = MT5Bridge(mt5link.MT5Broker(mcfg, self.workdir, link=link))
+        self.guard = MT5Bridge(broker.inner.guard)
+        if bars is None and mcfg.get("use_bars", True):
+            bars = MT5Bridge(mt5link.MT5Bars(link, self.workdir, self.bot["setup"]["interval"]))
+            if history is None:
+                history = mt5link.MT5History(bars, int(mcfg.get("history_days") or 60))
+        return broker, bars, history
 
     # ---- logging and state
 
@@ -646,10 +707,17 @@ class Bot(object):
         flat_by = self.cfg.get("flat_by") or "15:55"
         no_after = self.cfg.get("no_entries_after") or "15:30"
 
+        self.prop_emergency(now)
         for pos in self.open_positions():
-            self.watch_position(pos, hhmm >= flat_by)
+            self.watch_position(pos, hhmm >= flat_by or bool(self.state.get("halted")))
 
-        if hhmm < no_after and len(self.open_positions()) < int(self.bot["execution"]["max_open_positions"]):
+        if self.state.get("halted"):
+            for sym in self.candidates_in_order():
+                c = self.cand(sym)
+                if c["status"] not in DONE:
+                    c["status"] = "blocked"
+                    c["reasons"].append("the session is halted: %s" % self.state["halted"])
+        elif hhmm < no_after and len(self.open_positions()) < int(self.bot["execution"]["max_open_positions"]):
             self.maybe_scan(now)
             for sym in list(self.candidates_in_order()):
                 c = self.cand(sym)
@@ -669,6 +737,26 @@ class Bot(object):
                     c["status"] = "expired"
                     c["reasons"].append("no entries after %s" % no_after)
         self.save()
+
+    def prop_emergency(self, now):
+        """On a prop-firm account: equity inside the buffer of a firm rule means
+        everything the bot opened is closed at market and the day is over."""
+        if self.guard is None or self.state.get("halted"):
+            return
+        try:
+            reason = self.guard.emergency(now)
+        except BotError as e:
+            self.log("could not read the account for the prop rules: %s" % e)
+            return
+        if not reason:
+            return
+        self.state["halted"] = reason
+        self.log("PROP RULE EMERGENCY: %s. Closing everything the bot opened and taking no more trades today." % reason)
+        try:
+            closed = self.broker.flatten_all(now)
+            self.log("flattened %d position%s at the broker" % (len(closed), "" if len(closed) == 1 else "s"))
+        except BotError as e:
+            self.log("could not flatten at the broker: %s. Close the positions in the terminal yourself." % e)
 
     def candidates_in_order(self):
         order = []
@@ -772,6 +860,8 @@ class Bot(object):
         if not orders:
             return
         if not self.risk_ok(sym, c):
+            return
+        if not self.prop_ok(sym, c, orders["orders"][0]):
             return
         ticket = self.ticket(sym, c)
         if not ticket:
@@ -929,6 +1019,26 @@ class Bot(object):
         self.log("%s: risk: PASS. %s" % (sym, " ".join(r.get("info") or [])))
         return True
 
+    def prop_ok(self, sym, c, order):
+        """The prop firm's rules, measured on the live account, as one more gate
+        after trader-risk: the trade's loss at the stop has to fit inside the
+        room left under the daily loss limit and the max drawdown, buffer included."""
+        if self.guard is None:
+            return True
+        planned = float((order.get("plan") or {}).get("max_loss") or (c["stages"].get("size") or {}).get("max_loss") or 0)
+        ok, reason, snap = self.guard.check(self.now, planned)
+        c["stages"]["prop"] = {"ok": ok, "planned_loss": planned,
+                               "daily_used": snap["daily_used"], "daily_limit": snap["daily_limit"],
+                               "drawdown_used": snap["drawdown_used"], "drawdown_limit": snap["drawdown_limit"],
+                               "equity": snap["equity"]}
+        if not ok:
+            c["status"] = "blocked"
+            c["reasons"].append(reason)
+            self.log("%s: BLOCK by the prop rules: %s" % (sym, reason))
+            return False
+        self.log("%s: %s" % (sym, reason))
+        return True
+
     def ticket(self, sym, c):
         code, doc, err = self.tool.run("ticket", ["show", "--index", "1", "--json"])
         if not doc or not doc.get("ready"):
@@ -958,9 +1068,11 @@ class Bot(object):
             self.record_auto_yes(ticket, order)
             self.log("%s: auto mode on a %s account: the bot says yes to this one order" % (sym, account))
         try:
-            fill = self.broker.place(ticket["tool_input"], self.now) if self.broker_name == "sim" else \
-                self.broker.place(ticket["tool_input"], self.now,
-                                  wait_seconds=int(self.bot["execution"].get("fill_wait_seconds") or 60))
+            if self.broker_name == "sim":
+                fill = self.broker.place(ticket["tool_input"], self.now)
+            else:
+                fill = self.broker.place(ticket["tool_input"], self.now,
+                                         wait_seconds=int(self.bot["execution"].get("fill_wait_seconds") or 60))
         except BotError as e:
             c["status"] = "failed"
             c["reasons"].append(str(e))
@@ -982,11 +1094,17 @@ class Bot(object):
                "flat_by": plan.get("flat_by") or self.cfg.get("flat_by") or "15:55", "broker_id": fill["broker_id"],
                "status": "open", "mark": fill["filled_price"], "max_loss": round(
                    fill["filled_qty"] * (fill["filled_price"] - float(plan["stop"])), 2)}
+        if fill.get("lots") is not None:
+            pos.update({"lots": fill["lots"], "mt5_symbol": fill.get("mt5_symbol")})
+            if fill.get("risk_usd"):
+                pos["max_loss"] = float(fill["risk_usd"])
         self.state["positions"][sym] = pos
         c["status"] = "open"
-        self.log("%s: FILLED buy %d at %s (%s), bracket at the broker: stop-loss %s, take-profit %s" % (
+        for note in fill.get("notes") or []:
+            self.log("%s: %s" % (sym, note))
+        self.log("%s: FILLED buy %d at %s (%s), bracket at the broker: stop-loss %s, take-profit %s%s" % (
             sym, fill["filled_qty"], money(fill["filled_price"]), fill["broker_id"], money(pos["stop"]),
-            money(pos["target"])))
+            money(pos["target"]), " [%s lots of %s]" % (fill["lots"], fill["mt5_symbol"]) if fill.get("lots") else ""))
 
     def ask(self, sym, c, ticket):
         code, text, err = self.tool.run("ticket", ["show", "--index", "1"], want_json=False)
@@ -1052,7 +1170,10 @@ class Bot(object):
             self.note("%s: open, %d shares from %s, marked %s (stop %s, target %s, flat by %s)" % (
                 sym, pos["qty"], money(pos["entry"]), money(mark), money(pos["stop"]), money(pos["target"]), pos["flat_by"]))
             return
-        pnl = round((hit["price"] - pos["entry"]) * pos["qty"], 2)
+        if hit.get("pnl") is not None:
+            pnl = round(float(hit["pnl"]), 2)  # the broker's own number: commission and swap included
+        else:
+            pnl = round((hit["price"] - pos["entry"]) * pos["qty"], 2)
         pos.update({"status": "closed", "exit": hit["price"], "exit_reason": hit["reason"],
                     "exit_time": ny_text(hit["at"]) if isinstance(hit.get("at"), datetime.datetime) else ny_text(self.now),
                     "pnl": pnl, "r": round(pnl / pos["max_loss"], 2) if pos.get("max_loss") else None})
@@ -1071,6 +1192,8 @@ class Bot(object):
         lines = ["", "Session %s: %s mode, %s broker, %s account%s" % (
             s.get("date"), s.get("mode"), s.get("broker"), "PAPER" if s.get("paper") else "LIVE",
             " (replay)" if s.get("replay") else "")]
+        if s.get("halted"):
+            lines.append("  HALTED: %s" % s["halted"])
         for sym, c in s.get("candidates", {}).items():
             why = ("; ".join(c["reasons"])) if c.get("reasons") else ""
             lines.append("  %-6s %-9s %s" % (sym, c["status"], why[:110]))
@@ -1125,6 +1248,22 @@ class Bot(object):
             p["note"] = "open when the data ended"
         return True
 
+    def log_mt5_account(self):
+        acct = self.account_info or self.broker.account()
+        self.log("MetaTrader 5 %s account %s at %s (%s), %s: balance %s, equity %s, leverage 1:%s" % (
+            acct.get("kind", "?").upper(), acct.get("login", "?"), acct.get("server", "?"), acct.get("company", "?"),
+            acct.get("currency", "USD"), money(acct.get("balance") or 0), money(acct.get("equity") or 0),
+            acct.get("leverage", "?")))
+        try:
+            s = self.guard.snapshot(self.now or parse_now(None))
+        except BotError as e:
+            self.log("prop rules: could not read the account (%s)" % e)
+            return
+        self.log("prop rules: account size %s, daily loss limit %s (%s used today, day start %s), max drawdown %s "
+                 "(%s used), %.0f%% buffer under each" % (
+                     money(s["initial_balance"]), money(s["daily_limit"]), money(s["daily_used"]), money(s["day_start"]),
+                     money(s["drawdown_limit"]), money(s["drawdown_used"]), s["buffer_pct"]))
+
     def run_live(self, until="16:05"):
         day = to_eastern(parse_now(None)).date()
         if day.weekday() >= 5:
@@ -1135,6 +1274,8 @@ class Bot(object):
             acct = self.broker.account()
             self.log("Alpaca account %s, %s, equity %s" % (acct.get("account_number", "?"), acct.get("status", "?"),
                                                             money(acct.get("equity") or 0)))
+        elif self.broker_name == "mt5":
+            self.log_mt5_account()
         step = datetime.timedelta(minutes=1 if self.bot["setup"]["interval"] == "1m" else 5)
         grace = datetime.timedelta(seconds=int(self.bot.get("bar_grace_seconds") or 25))
         poll = int(self.bot.get("poll_seconds") or 20)
@@ -1325,7 +1466,11 @@ MENU = [
     ("7", "Run today, live, auto mode on the paper sim", ["run", "--mode", "auto", "--broker", "sim"]),
     ("8", "Run today, live, auto mode on your Alpaca PAPER account (keys in the environment)",
      ["run", "--mode", "auto", "--broker", "alpaca"]),
-    ("9", "Status of the current session", ["status", "--events", "15"]),
+    ("9", "Run today, live, auto mode on your MetaTrader 5 prop-firm account (terminal open, MT5_PASSWORD set)",
+     ["run", "--mode", "auto", "--broker", "mt5"]),
+    ("c", "Run today, live, confirm mode on MetaTrader 5: you type yes or no for each order",
+     ["run", "--mode", "confirm", "--broker", "mt5"]),
+    ("s", "Status of the current session", ["status", "--events", "15"]),
     ("e", "Edit the settings (opens the trader folder)", None),
     ("q", "Quit", None),
 ]
@@ -1427,7 +1572,9 @@ def main(argv=None):
         p.add_argument("--scan", action="store_true", help="add the scanner's opening-range breakouts")
         p.add_argument("--quiet", action="store_true")
         if not replay:
-            p.add_argument("--broker", choices=BROKERS, help="sim (built-in paper) or alpaca (REST, keys in env)")
+            p.add_argument("--broker", choices=BROKERS,
+                           help="sim (built-in paper), alpaca (REST, keys in env) or mt5 (MetaTrader 5 terminal, "
+                                "prop-firm rules enforced, MT5_PASSWORD in env)")
 
     p = sub.add_parser("init", help="write trader/config.json and trader/bot.json from the examples")
     p.add_argument("--dir")

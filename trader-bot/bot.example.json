@@ -40,6 +40,26 @@
     "max_open_positions": 1,
     "fill_wait_seconds": 60
   },
+  "mt5": {
+    "terminal_path": null,
+    "login": null,
+    "server": null,
+    "symbols": {"TSLA": "TSLA.US"},
+    "symbol_suffix": ".US",
+    "server_utc_offset_hours": null,
+    "magic": 20261019,
+    "deviation_points": 20,
+    "use_bars": true,
+    "history_days": 60,
+    "allow_auto_on_real": false,
+    "prop": {
+      "initial_balance": null,
+      "max_daily_loss_pct": 5.0,
+      "max_total_drawdown_pct": 10.0,
+      "buffer_pct": 20.0,
+      "daily_reset_server_time": "00:00"
+    }
+  },
   "poll_seconds": 20,
   "bar_grace_seconds": 25
 }

@@ -39,7 +39,7 @@ import bot  # noqa: E402  (the same module the console runs)
 VERSION = bot.VERSION
 CLI_NAME = "DayTraderBotCLI.exe" if sys.platform == "win32" else "DayTraderBotCLI"
 MODES = ("dry-run", "confirm", "auto")
-BROKERS = ("sim", "alpaca")
+BROKERS = ("sim", "alpaca", "mt5")
 PROMPTS = ("Reply yes or no: ", "Enter keeps trader\\bot.json): ", "Choose: ")
 PROMPT_STARTS = ("Press Enter",)
 REEL = ["replay", "--fixtures", "--fresh"]
@@ -212,8 +212,9 @@ class App(object):
         mode.bind("<<ComboboxSelected>>", lambda e: self._explain_mode())
         ttk.Label(form, text="Broker").grid(row=1, column=2, sticky="e", padx=6)
         self.broker_var = tk.StringVar(value="sim")
-        ttk.Combobox(form, textvariable=self.broker_var, values=BROKERS, state="readonly",
-                     width=10).grid(row=1, column=3, sticky="w", padx=6)
+        broker = ttk.Combobox(form, textvariable=self.broker_var, values=BROKERS, state="readonly", width=10)
+        broker.grid(row=1, column=3, sticky="w", padx=6)
+        broker.bind("<<ComboboxSelected>>", lambda e: self._explain_mode())
         self.mode_help = tk.StringVar()
         ttk.Label(form, textvariable=self.mode_help, foreground="#555").grid(row=2, column=0, columnspan=4,
                                                                              sticky="w", padx=6, pady=(0, 6))
@@ -275,11 +276,15 @@ class App(object):
             self.account_lbl.configure(foreground="#b00020")
 
     def _explain_mode(self):
-        self.mode_help.set({
+        text = {
             "dry-run": "dry-run: the whole method runs and nothing is placed.",
             "confirm": "confirm: each READY ticket is shown here and waits for your typed yes or no in the Reply box.",
             "auto": "auto: the bot says yes itself. Paper accounts only; on a live account it refuses to start.",
-        }[self.mode_var.get()])
+        }[self.mode_var.get()]
+        if self.broker_var.get() == "mt5":
+            text += ("  MT5: the open terminal is the broker and the candle feed; the prop firm's daily loss and "
+                     "drawdown limits (trader\\bot.json, \"mt5\") are enforced on top; password in MT5_PASSWORD.")
+        self.mode_help.set(text)
 
     # ---- log
 
@@ -313,6 +318,14 @@ class App(object):
             if not messagebox.askyesno("Alpaca, hands off",
                                        "Auto mode on Alpaca places bracket orders on your PAPER account without "
                                        "asking again (keys from ALPACA_API_KEY / ALPACA_SECRET_KEY). Continue?"):
+                return
+        if action == "run" and mode == "auto" and broker == "mt5":
+            if not messagebox.askyesno("MetaTrader 5, hands off",
+                                       "Auto mode on MetaTrader 5 sends market deals with stop-loss and take-profit "
+                                       "to the account the open terminal is logged in to, without asking again. "
+                                       "The bot stops for the day when the prop firm's daily loss or drawdown limit "
+                                       "comes within the buffer, and flattens what it opened. A funded account is "
+                                       "not a toy: a breached rule ends it. Continue?"):
                 return
         self.append("\n> %s\n\n" % describe(argv), "prompt")
         self.runner = Runner(argv).start()

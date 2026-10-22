@@ -1,5 +1,6 @@
 import copy
 import datetime
+import gzip
 import io
 import json
 import os
@@ -7,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import time
+import types
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
@@ -384,7 +386,7 @@ class App(unittest.TestCase):
         self.assertEqual(out.getvalue(), "")
 
     def test_the_menu_runs_a_choice_and_quits(self):
-        answers = iter(["3", "", "9", "", "q"])
+        answers = iter(["3", "", "s", "", "q"])
         out = io.StringIO()
         a = type("A", (), {"dir": self.d, "once": False, "no_prompt": True, "pause": False})()
         with redirect_stdout(out):
@@ -609,6 +611,408 @@ class Config(unittest.TestCase):
         finally:
             os.environ.pop("ALPACA_API_KEY", None)
             os.environ.pop("ALPACA_SECRET_KEY", None)
+
+
+mt5link = load("trader-bot", "mt5link")
+SERVER_OFFSET = 3  # the terminal's clock runs UTC+3, as many brokers' do
+
+
+def ns(**kw):
+    return types.SimpleNamespace(**kw)
+
+
+class FakeMT5(object):
+    """Enough of the MetaTrader5 package for the bot: one demo account, one
+    symbol (TSLA.US) with the TSLA fixture's candles stamped in server time,
+    market deals that open and close positions, and a deal history."""
+
+    def __init__(self, balance=100000.0, equity=None, trade_mode=0, contract=1.0, vmin=1.0, step=1.0,
+                 tick_value=0.01, rows=None, ask=364.30):
+        self.balance, self.equity, self.trade_mode = balance, balance if equity is None else equity, trade_mode
+        self.spec = dict(contract=contract, vmin=vmin, step=step, tick_value=tick_value)
+        self.rows = rows if rows is not None else self.fixture_rows()
+        self.ask, self.bid = ask, round(ask - 0.02, 2)
+        self.tick_time_utc = bot.hhmm_to_utc(DAY, "10:50")
+        self.init_kw, self.sent, self.positions, self.deals = None, [], [], []
+        self.n = 7000
+        self.fail_init = False
+        self.down = False
+
+    @staticmethod
+    def fixture_rows():
+        with gzip.open(HIST) as fh:
+            res = json.load(fh)["chart"]["result"][0]
+        q = res["indicators"]["quote"][0]
+        rows = []
+        for i, t in enumerate(res["timestamp"]):
+            if t % 300 == 0 and q["close"][i] is not None:
+                rows.append((t + 3600 * SERVER_OFFSET, q["open"][i], q["high"][i], q["low"][i], q["close"][i],
+                             q["volume"][i] or 0, 2, 0))
+        return rows
+
+    # -- the package's surface
+    def initialize(self, **kw):
+        self.init_kw = kw
+        return not self.fail_init
+
+    def last_error(self):
+        return (0, "ok")
+
+    def shutdown(self):
+        self.down = True
+
+    def account_info(self):
+        return ns(login=51001234, server="Prop-Server", name="Challenge 100k", company="A Prop Firm", currency="USD",
+                  balance=self.balance, equity=self.equity, margin_free=self.equity, leverage=30,
+                  trade_mode=self.trade_mode)
+
+    def symbol_select(self, sym, enable=True):
+        return sym == "TSLA.US"
+
+    def symbol_info(self, sym):
+        s = self.spec
+        return ns(name=sym, digits=2, point=0.01, trade_contract_size=s["contract"], volume_min=s["vmin"],
+                  volume_max=1000.0, volume_step=s["step"], trade_tick_size=0.01, trade_tick_value=s["tick_value"],
+                  trade_tick_value_loss=s["tick_value"], filling_mode=2)
+
+    def symbol_info_tick(self, sym):
+        return ns(time=mt5link.ts_of(self.tick_time_utc) + 3600 * SERVER_OFFSET, bid=self.bid, ask=self.ask,
+                  last=self.bid)
+
+    def copy_rates_from_pos(self, sym, tf, start, count):
+        return list(self.rows[-count:])
+
+    def order_send(self, req):
+        self.sent.append(dict(req))
+        self.n += 1
+        if "position" in req:
+            p = next((x for x in self.positions if x.ticket == req["position"]), None)
+            if p is None:
+                return ns(retcode=10013, comment="no such position", order=0, deal=0, volume=0, price=0)
+            self._close(p, req["price"], reason=0)
+            return ns(retcode=10009, comment="done", order=self.n, deal=self.n + 1000, volume=req["volume"],
+                      price=req["price"])
+        p = ns(ticket=self.n, symbol=req["symbol"], volume=req["volume"], type=req["type"], price_open=req["price"],
+               price_current=req["price"], profit=0.0, sl=req.get("sl"), tp=req.get("tp"), magic=req.get("magic", 0))
+        self.positions.append(p)
+        return ns(retcode=10009, comment="done", order=self.n, deal=self.n + 1000, volume=req["volume"],
+                  price=req["price"])
+
+    def positions_get(self, symbol=None, ticket=None):
+        out = list(self.positions)
+        if symbol is not None:
+            out = [p for p in out if p.symbol == symbol]
+        if ticket is not None:
+            out = [p for p in out if p.ticket == ticket]
+        return tuple(out)
+
+    def history_deals_get(self, position=None, **kw):
+        return tuple(d for d in self.deals if position is None or d.position_id == position)
+
+    # -- the test's levers
+    def _close(self, p, price, reason):
+        pnl = round((price - p.price_open) * p.volume * self.spec["contract"], 2)
+        self.positions.remove(p)
+        self.n += 1
+        self.deals.append(ns(ticket=self.n, position_id=p.ticket, entry=1, reason=reason, price=price, profit=pnl,
+                             commission=-0.5, swap=0.0,
+                             time=mt5link.ts_of(self.tick_time_utc) + 3600 * SERVER_OFFSET))
+        self.balance = round(self.balance + pnl - 0.5, 2)
+        self.equity = self.balance
+        return pnl
+
+    def hit_target(self, price):
+        return self._close(self.positions[0], price, reason=5)
+
+
+class MT5Link(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="bot-mt5-")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def order(self, qty="8"):
+        return {"symbol": "TSLA", "side": "buy", "qty": qty, "type": "market", "stop_loss_stop_price": "358.32",
+                "take_profit_limit_price": "370.04", "plan": {"entry": 364.18, "stop": 358.32, "max_loss": 46.88}}
+
+    def test_symbols_map_then_suffix(self):
+        cfg = {"symbols": {"tsla": "TSLA.US"}, "symbol_suffix": ".cash"}
+        self.assertEqual(mt5link.firm_symbol(cfg, "TSLA"), "TSLA.US")
+        self.assertEqual(mt5link.firm_symbol(cfg, "nvda"), "NVDA.cash")
+        self.assertEqual(mt5link.firm_symbol({}, "XAUUSD"), "XAUUSD")
+
+    def test_lots_follow_the_contract_and_fit_the_max_loss(self):
+        one = FakeMT5().symbol_info("TSLA.US")
+        self.assertEqual(mt5link.lots_for(self.order(), one, 46.88), (8.0, 46.88, []))
+        cfd = FakeMT5(contract=100.0, vmin=0.01, step=0.01, tick_value=1.0).symbol_info("TSLA.US")
+        lots, risk, notes = mt5link.lots_for(self.order(), cfd, 46.88)
+        self.assertEqual((lots, risk, notes), (0.08, 46.88, []))
+        lots, risk, notes = mt5link.lots_for(self.order(), cfd, 30.0)
+        self.assertEqual((lots, risk), (0.05, 29.3))
+        self.assertIn("reduced from 0.08 to 0.05 lots", notes[0])
+        big = FakeMT5(contract=100.0, vmin=0.1, step=0.1, tick_value=1.0).symbol_info("TSLA.US")
+        lots, risk, notes = mt5link.lots_for(self.order(), big, 46.88)
+        self.assertEqual(lots, 0.0)
+        self.assertIn("smallest lot (0.1) risks $58.60", notes[-1])
+        lots, risk, notes = mt5link.lots_for(self.order("3"), cfd, 500.0)
+        self.assertEqual(lots, 0.03)
+
+    def test_rates_become_a_chart_the_tools_read(self):
+        rows = FakeMT5.fixture_rows()
+        doc = mt5link.rates_to_chart("TSLA", rows, SERVER_OFFSET, last_price=366.07,
+                                     last_time_utc=bot.hhmm_to_utc(DAY, "10:49"))
+        res = doc["chart"]["result"][0]
+        self.assertEqual(res["meta"]["symbol"], "TSLA")
+        self.assertEqual(res["meta"]["dataGranularity"], "5m")
+        self.assertEqual(res["timestamp"][-1], ts(DAY, "10:45"))
+        self.assertAlmostEqual(res["meta"]["previousClose"], 354.67, places=2)  # the last bar before the day
+        self.assertEqual(res["meta"]["regularMarketPrice"], 366.07)
+        path = os.path.join(self.d, "TSLA.json")
+        with open(path, "w") as fh:
+            json.dump(doc, fh)
+        code, out, err = run(["--tool", bot.TOOLS["entry"], "check", "TSLA", "--json", "--now", "2026-10-19 10:50",
+                              "--offline", path])
+        ent = json.loads(out)
+        self.assertEqual(ent["status"], "triggered")
+        self.assertEqual((ent["trigger"]["time"], ent["trigger"]["price"]), ("10:15 AM", 364.18))
+
+    def test_bars_close_on_the_clock_and_the_tick_rides_along(self):
+        fake = FakeMT5()
+        link = mt5link.Link({"server_utc_offset_hours": SERVER_OFFSET, "symbols": {"TSLA": "TSLA.US"}}, mt5=fake)
+        link.connect()
+        bars = mt5link.MT5Bars(link, self.d)
+        closed, tick = bars.bars("TSLA", bot.hhmm_to_utc(DAY, "10:50"))
+        self.assertEqual(closed[-1]["t"], bot.hhmm_to_utc(DAY, "10:45"))
+        self.assertEqual(tick, {"t": bot.hhmm_to_utc(DAY, "10:50"), "price": 364.28})
+        closed, tick = bars.bars("TSLA", bot.hhmm_to_utc(DAY, "10:47"))
+        self.assertEqual(closed[-1]["t"], bot.hhmm_to_utc(DAY, "10:40"))
+        self.assertIsNone(tick)
+        folder = bars.entry_path("TSLA")
+        self.assertTrue(os.path.exists(os.path.join(folder, "TSLA.json")))
+        hist = mt5link.MT5History(bars).path_for("TSLA")
+        with open(hist) as fh:
+            self.assertEqual(len(json.load(fh)["chart"]["result"][0]["timestamp"]), len(fake.rows))
+        self.assertIn("A Prop Firm", bars.describe())
+
+    def test_server_offset_is_measured_from_a_tick_when_not_configured(self):
+        fake = FakeMT5()
+        fake.tick_time_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        link = mt5link.Link({"symbols": {"TSLA": "TSLA.US"}}, mt5=fake)
+        link.connect()
+        self.assertEqual(link.server_offset("TSLA.US"), SERVER_OFFSET)
+
+    def test_connect_wants_the_password_in_the_environment_only(self):
+        os.environ.pop("MT5_PASSWORD", None)
+        fake = FakeMT5()
+        with self.assertRaises(mt5link.MT5Error) as cm:
+            mt5link.Link({"login": 51001234, "server": "Prop-Server"}, mt5=fake).connect()
+        self.assertIn("MT5_PASSWORD", str(cm.exception))
+        os.environ["MT5_PASSWORD"] = "hunter2"
+        try:
+            acct = mt5link.Link({"login": 51001234, "server": "Prop-Server"}, mt5=fake).connect()
+        finally:
+            os.environ.pop("MT5_PASSWORD", None)
+        self.assertEqual(fake.init_kw, {"login": 51001234, "password": "hunter2", "server": "Prop-Server"})
+        self.assertEqual((acct["kind"], acct["balance"]), ("demo", 100000.0))
+        fake.fail_init = True
+        with self.assertRaises(mt5link.MT5Error):
+            mt5link.Link({}, mt5=fake).connect()
+
+    def guard(self, fake, **prop):
+        link = mt5link.Link({"server_utc_offset_hours": SERVER_OFFSET}, mt5=fake)
+        link.connect()
+        return mt5link.PropGuard(link, {"prop": prop}, os.path.join(self.d, "trader", "state", "mt5.json"))
+
+    def test_prop_guard_measures_the_firms_two_limits_with_a_buffer(self):
+        fake = FakeMT5(balance=100000.0)
+        g = self.guard(fake, max_daily_loss_pct=5.0, max_total_drawdown_pct=10.0, buffer_pct=20.0)
+        now = bot.hhmm_to_utc(DAY, "10:50")
+        ok, reason, s = g.check(now, 46.88)
+        self.assertTrue(ok)
+        self.assertEqual((s["daily_limit"], s["drawdown_limit"], s["daily_room"]), (5000.0, 10000.0, 4000.0))
+        self.assertIn("$0.00 of $5,000.00".replace(",", ""), reason.replace(",", ""))
+        fake.equity = 96500.0  # a bad morning: $3,500 down from the day's start
+        ok, reason, s = g.check(now, 600.0)
+        self.assertFalse(ok)
+        self.assertIn("prop rule: daily loss", reason)
+        self.assertEqual(s["daily_room"], 500.0)
+        self.assertIsNone(g.emergency(now))
+        fake.equity = 95900.0
+        self.assertIn("daily loss limit", g.emergency(now))
+        # the day start is remembered across a restart, and it is the firm's day, not New York's
+        g2 = self.guard(fake)
+        self.assertEqual(g2.state["day_start"], 100000.0)
+        self.assertEqual(g2.state["initial_balance"], 100000.0)
+        self.assertEqual(g2.firm_day(now), "2026-10-19")
+        self.assertEqual(g2.firm_day(bot.hhmm_to_utc(DAY, "17:30")), "2026-10-20")  # 00:30 server time
+        # the overall drawdown counts from the account size, over days
+        fake.balance = fake.equity = 90500.0
+        g3 = self.guard(fake, max_daily_loss_pct=5.0, max_total_drawdown_pct=10.0, buffer_pct=20.0,
+                        initial_balance=100000.0)
+        later = bot.hhmm_to_utc(DAY + datetime.timedelta(days=2), "10:00")
+        ok, reason, s = g3.check(later, 100.0)
+        self.assertFalse(ok)
+        self.assertIn("prop rule: max drawdown", reason)
+        self.assertIn("max drawdown", g3.emergency(later))
+
+    def test_broker_places_a_deal_with_sl_tp_and_reads_the_close_from_history(self):
+        fake = FakeMT5(ask=364.30)
+        b = mt5link.MT5Broker({"server_utc_offset_hours": SERVER_OFFSET, "symbols": {"TSLA": "TSLA.US"}}, self.d,
+                              link=mt5link.Link({"server_utc_offset_hours": SERVER_OFFSET}, mt5=fake))
+        b.connect()
+        now = bot.hhmm_to_utc(DAY, "10:50")
+        fill = b.place(self.order(), now)
+        req = fake.sent[-1]
+        self.assertEqual((req["symbol"], req["volume"], req["type"], req["sl"], req["tp"]),
+                         ("TSLA.US", 8.0, 0, 358.32, 370.04))
+        self.assertEqual(req["magic"], 20261019)
+        self.assertEqual((fill["filled_qty"], fill["filled_price"], fill["lots"], fill["mt5_symbol"]),
+                         (8, 364.3, 8.0, "TSLA.US"))
+        pos = {"symbol": "TSLA", "broker_id": fill["broker_id"], "entry": 364.3, "qty": 8, "mt5_symbol": "TSLA.US"}
+        self.assertIsNone(b.watch(pos, now))
+        self.assertEqual(pos["mark"], 364.3)
+        fake.hit_target(370.04)
+        hit = b.watch(pos, now)
+        self.assertEqual((hit["reason"], hit["price"], hit["pnl"]), ("target", 370.04, round(8 * 5.74 - 0.5, 2)))
+        self.assertEqual(hit["at"], now)
+        # a flatten sends the opposite deal against the position ticket
+        fill2 = b.place(self.order(), now)
+        pos2 = {"symbol": "TSLA", "broker_id": fill2["broker_id"], "entry": 364.3, "qty": 8}
+        out = b.flatten(pos2, now)
+        self.assertEqual(fake.sent[-1]["position"], int(fill2["broker_id"]))
+        self.assertEqual(fake.sent[-1]["type"], 1)
+        self.assertEqual((out["reason"], out["price"]), ("flat_by", 364.28))
+        self.assertEqual(fake.positions, [])
+        # too small a budget for the smallest lot is a refusal, not a deal
+        fake.spec.update(contract=100.0, vmin=0.1, step=0.1, tick_value=1.0)
+        with self.assertRaises(mt5link.MT5Error) as cm:
+            b.place(self.order(), now)
+        self.assertIn("smallest lot", str(cm.exception))
+        self.assertEqual(len(fake.sent), 3)
+
+
+class MT5Bot(unittest.TestCase):
+    """The whole bot on a fake terminal: the pack's tools read the firm's candles,
+    the fill is a deal with SL/TP, the prop rules gate and halt."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="bot-mt5bot-")
+        os.makedirs(os.path.join(self.d, "trader"))
+        shutil.copy(CFG, os.path.join(self.d, "trader", "config.json"))
+        with open(os.path.join(ROOT, "trader-bot", "bot.example.json")) as fh:
+            self.cfg = json.load(fh)
+        self.cfg["timemachine"]["replays"] = 2000
+        self.cfg["mt5"].update({"server_utc_offset_hours": SERVER_OFFSET, "symbols": {"TSLA": "TSLA.US"}})
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def make(self, fake, mode="auto", **kw):
+        return bot.Bot(self.d, self.cfg, mode=mode, broker="mt5", news_dir=NEWS, mt5=fake, out=io.StringIO(), **kw)
+
+    def walk(self, b, fake, start, end):
+        t = bot.hhmm_to_utc(DAY, start)
+        last = bot.hhmm_to_utc(DAY, end)
+        while t <= last:
+            fake.tick_time_utc = t
+            b.tick(t)
+            t += datetime.timedelta(minutes=5)
+
+    def test_the_reel_day_fills_on_the_terminal_and_closes_at_the_target(self):
+        fake = FakeMT5(ask=364.18)  # the ask is the fill; an ask over the plan's entry would cost reward:risk
+        b = self.make(fake)
+        self.assertEqual(b.bars.kind, "mt5")
+        self.assertEqual(b.account_info["kind"], "demo")
+        self.walk(b, fake, "09:30", "10:20")
+        c = b.state["candidates"]["TSLA"]
+        self.assertEqual(c["status"], "open", c["reasons"])
+        self.assertEqual(c["stages"]["entry"]["trigger"]["time"], "10:15 AM")
+        self.assertEqual(c["stages"]["timemachine"]["history"]["triggered"], 33)
+        self.assertEqual(c["stages"]["size"]["qty"], 8)
+        self.assertEqual(c["stages"]["risk"]["verdict"], "PASS")
+        self.assertTrue(c["stages"]["prop"]["ok"])
+        self.assertEqual(c["stages"]["prop"]["daily_limit"], 5000.0)
+        p = b.state["positions"]["TSLA"]
+        self.assertEqual((p["qty"], p["entry"], p["lots"], p["mt5_symbol"]), (8, 364.18, 8.0, "TSLA.US"))
+        self.assertEqual((p["stop"], p["target"]), (358.32, 370.04))
+        self.assertEqual(p["max_loss"], 46.88)
+        req = fake.sent[-1]
+        self.assertEqual((req["symbol"], req["volume"], req["sl"], req["tp"]), ("TSLA.US", 8.0, 358.32, 370.04))
+        with open(os.path.join(self.d, "trader", "state", "broker.json")) as fh:
+            log = json.load(fh)["orders"]
+        self.assertEqual([o["status"] for o in log], ["approved", "placed", "filled"])
+        self.assertEqual((log[0]["auto"], log[0]["broker"]), (True, "mt5"))
+        # the terminal closes it at the take-profit; the bot reads the deal and books the broker's own P&L
+        fake.hit_target(370.04)
+        self.walk(b, fake, "10:25", "10:25")
+        p = b.state["positions"]["TSLA"]
+        self.assertEqual((p["status"], p["exit_reason"], p["exit"]), ("closed", "target", 370.04))
+        self.assertEqual(p["pnl"], round(8 * (370.04 - 364.18) - 0.5, 2))  # the deal's profit less commission
+        self.assertEqual(b.state["candidates"]["TSLA"]["status"], "closed")
+        self.assertIn("TARGET filled at $370.04", " ".join(e["text"] for e in b.state["events"]))
+        self.assertIn("realised +$46.38 on 1 trade", b.summary())
+
+    def test_the_prop_rules_block_a_trade_that_does_not_fit_the_room(self):
+        fake = FakeMT5(balance=100000.0, equity=99640.0, ask=364.18)  # $360 down, $40 of room under the buffered $500 limit
+        self.cfg["mt5"]["prop"].update({"max_daily_loss_pct": 0.5, "initial_balance": 100000.0})
+        b = self.make(fake)
+        self.walk(b, fake, "10:15", "10:20")
+        c = b.state["candidates"]["TSLA"]
+        self.assertEqual(c["status"], "blocked", c["reasons"])
+        self.assertIn("prop rule: daily loss", c["reasons"][-1])
+        self.assertFalse(c["stages"]["prop"]["ok"])
+        self.assertEqual(c["stages"]["prop"]["daily_used"], 360.0)
+        self.assertEqual(fake.sent, [])
+        self.assertEqual(b.state["positions"], {})
+
+    def test_an_emergency_flattens_the_bots_positions_and_halts_the_day(self):
+        fake = FakeMT5(balance=100000.0, equity=99500.0)
+        fake.order_send({"action": 1, "symbol": "TSLA.US", "volume": 8.0, "type": 0, "price": 364.3, "magic": 20261019})
+        fake.order_send({"action": 1, "symbol": "TSLA.US", "volume": 1.0, "type": 0, "price": 364.3, "magic": 1})
+        self.cfg["mt5"]["prop"].update({"max_daily_loss_pct": 0.5, "initial_balance": 100000.0})
+        b = self.make(fake)
+        self.walk(b, fake, "10:20", "10:20")
+        self.assertIn("daily loss limit", b.state["halted"])
+        self.assertEqual([p.magic for p in fake.positions], [1])  # someone else's position is left alone
+        self.assertEqual(fake.sent[-1]["position"], 7001)
+        text = " ".join(e["text"] for e in b.state["events"])
+        self.assertIn("PROP RULE EMERGENCY", text)
+        self.assertIn("flattened 1 position", text)
+        self.assertEqual(b.state["candidates"]["TSLA"]["status"], "blocked")
+        self.assertIn("HALTED", b.summary())
+        self.walk(b, fake, "10:25", "10:25")
+        self.assertEqual(len([r for r in fake.sent if "position" in r]), 1)
+
+    def test_account_kind_against_the_config(self):
+        with self.assertRaises(bot.BotError) as cm:
+            self.make(FakeMT5(trade_mode=2))
+        self.assertIn("REAL account", str(cm.exception))
+        live = os.path.join(self.d, "trader", "config.json")
+        with open(live) as fh:
+            cfg = json.load(fh)
+        cfg["paper"] = False
+        with open(live, "w") as fh:
+            json.dump(cfg, fh)
+        with self.assertRaises(bot.BotError) as cm:
+            self.make(FakeMT5(trade_mode=2), mode="auto")
+        self.assertIn("allow_auto_on_real", str(cm.exception))
+        b = self.make(FakeMT5(trade_mode=2), mode="confirm")
+        self.assertFalse(b.paper)
+        self.cfg["mt5"]["allow_auto_on_real"] = True
+        b = self.make(FakeMT5(trade_mode=2), mode="auto")
+        self.assertEqual(b.account_info["kind"], "real")
+        with self.assertRaises(bot.BotError) as cm:
+            self.make(FakeMT5(), replay=True)
+        self.assertIn("MetaTrader 5", str(cm.exception))
+
+    def test_the_example_config_and_the_window_know_the_broker(self):
+        self.assertIn("mt5", bot.BROKERS)
+        self.assertEqual(sorted(bot.DEFAULTS["mt5"]), sorted(mt5link.DEFAULTS))
+        self.assertIn(["run", "--mode", "auto", "--broker", "mt5"], [argv for _, _, argv in bot.MENU])
+        g = load("trader-bot", "gui")
+        self.assertIn("mt5", g.BROKERS)
+        self.assertEqual(g.build_argv("run", "TSLA", "auto", "mt5")[:5], ["run", "--mode", "auto", "--broker", "mt5"])
 
 
 if __name__ == "__main__":
