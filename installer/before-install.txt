@@ -1,0 +1,26 @@
+Day Trader Bot
+
+This installs the Day Trader skill's trading bot as a Windows program. It
+needs no Python on your computer: everything it runs is inside the folder it
+installs to.
+
+What it does: it watches stocks bar by bar, times an entry on an
+opening-range breakout, sets a stop and a target, replays the odds, sizes
+the order to your budget and your max loss, checks it against your limits,
+and then, only in the mode you choose, places it.
+
+How it starts: in dry-run mode, on a paper account, with a $5,000 example
+budget and a $50 max loss a trade. Dry-run places nothing. "Confirm" mode
+asks you to type yes for each order. "Auto" mode trades hands-off, and it
+works only on a paper account: on a live account it refuses to start.
+
+Where your settings live: %USERPROFILE%\DayTraderBot\trader\config.json and
+bot.json. Uninstalling the program leaves that folder alone.
+
+Broker keys: for Alpaca, set ALPACA_API_KEY and ALPACA_SECRET_KEY as
+environment variables (paper keys from the Alpaca dashboard). The program
+never asks for them, stores them or prints them.
+
+Not financial advice. This is software that reads free public data and does
+arithmetic. Most people who day trade lose money. You can lose money. Paper
+trade first, and decide for yourself.

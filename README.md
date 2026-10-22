@@ -213,6 +213,46 @@ decide as they always do. Every skip, block and fill is in
 Everything in "Fine print" applies twice over to a bot. Replay first, then
 dry-run, then confirm, then auto on paper. The bot never flips `"paper"`.
 
+### The Windows app
+
+The bot also ships as a Windows program, `DayTraderBot-Setup-<version>.exe`,
+that needs no Python on the machine. The installer puts `DayTraderBot.exe`
+and the whole pack in Program Files (or your user folder if you choose "for
+me only"), adds Start menu entries (the menu, "replay the reel day", "run
+today (dry-run)", your data folder, the README), an optional desktop icon
+and an optional PATH entry. Your settings and logs live in
+`%USERPROFILE%\DayTraderBot\trader\`, and uninstalling leaves them alone.
+
+Double-click `DayTraderBot` and you get a menu: set up, replay the reel day
+(dry-run, auto, or with the scanner), run today in dry-run, confirm or auto
+mode, status, edit the settings. From a Command Prompt the same commands as
+`bot.py` work, with `DayTraderBot` in place of `python3 trader-bot/bot.py`:
+
+```
+DayTraderBot replay --fixtures --mode auto
+DayTraderBot run --symbols TSLA,AAPL --mode confirm
+DayTraderBot status --events 20
+```
+
+Build it yourself on Windows with Python 3.8+ and
+[Inno Setup 6](https://jrsoftware.org/isinfo.php) installed:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File installer\build.ps1
+```
+
+That runs PyInstaller on `installer\DayTraderBot.spec` (one folder,
+`dist\DayTraderBot\`, with the exe doubling as the Python that runs the
+tool scripts), smoke-tests the frozen app on the reel day, then compiles
+`installer\DayTraderBot.iss` into `installer\Output\DayTraderBot-Setup-<version>.exe`.
+`-SkipInstaller` stops after the exe. The GitHub Actions workflow in
+`.github/workflows/windows-installer.yml` does the same on a Windows runner
+for every `v*` tag and attaches the installer to the release.
+
+For Alpaca, set `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` in Windows
+(Settings > System > About > Advanced system settings > Environment
+Variables) before you start the app. It never asks for them.
+
 ## Fine print
 
 **Not financial advice.** This is software that reads public data and does

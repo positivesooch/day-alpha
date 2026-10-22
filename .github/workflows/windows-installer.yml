@@ -1,0 +1,50 @@
+name: Windows installer
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s tests
+
+  installer:
+    needs: tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Build DayTraderBot.exe and the installer
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File installer\build.ps1
+      - name: Installer runs silently
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem installer\Output\DayTraderBot-Setup-*.exe | Select-Object -First 1
+          Start-Process -Wait -FilePath $setup.FullName -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$env:RUNNER_TEMP\DTB"
+          & "$env:RUNNER_TEMP\DTB\DayTraderBot.exe" --version
+          & "$env:RUNNER_TEMP\DTB\DayTraderBot.exe" replay --fixtures --fresh --quiet
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DayTraderBot-Setup
+          path: installer/Output/DayTraderBot-Setup-*.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DayTraderBot-portable
+          path: dist/DayTraderBot/
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer/Output/DayTraderBot-Setup-*.exe
