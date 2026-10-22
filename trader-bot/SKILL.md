@@ -109,14 +109,22 @@ Fills go through `ticket.py result` and `ticket.py fill`, so the pack's own
 log, portfolio and daily-loss count stay right, and `/trader-risk` sees the
 bot's trades like anyone else's.
 
-## The Windows app
+## The window and the Windows app
 
-`installer/` builds the bot into `DayTraderBot-Setup-<version>.exe`
+`gui.py` is a Tkinter window over the same bot: symbols, mode, broker and
+the scanner checkbox, three buttons (Replay the reel day, Run today, Status),
+Stop, a log pane, and a Reply box that lights up when the bot waits for
+your yes or no in confirm mode. It never trades by itself: each button
+starts `bot.py` as a subprocess with the arguments you would have typed.
+`python3 bot.py gui` opens it (Debian/Ubuntu need `python3-tk`).
+
+`installer/` builds both into `DayTraderBot-Setup-<version>.exe`
 (PyInstaller plus Inno Setup; `installer/build.ps1` does both). The
-installed `DayTraderBot.exe` takes the same commands as `bot.py`, opens a
-menu when double-clicked, runs the pack's tool scripts itself (no Python on
-the machine), and keeps its data in `%USERPROFILE%\DayTraderBot\trader\`.
-`DAYTRADERBOT_HOME` moves that folder. The README has the details.
+installed `DayTraderBot.exe` is the window; `DayTraderBotCLI.exe` takes the
+same commands as `bot.py`, opens the console menu when double-clicked, and
+runs the pack's tool scripts itself (no Python on the machine). Data lives
+in `%USERPROFILE%\DayTraderBot\trader\`; `DAYTRADERBOT_HOME` moves it. The
+README has the details.
 
 ## Replays
 

@@ -6,6 +6,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
@@ -418,19 +419,133 @@ class App(unittest.TestCase):
         for fixture in ("TSLA-2026-10-19-5m.json", "TSLA-60d5m.json.gz", "wall5m-2026-10-19.json.gz", "trader-news"):
             self.assertIn(fixture, spec, fixture)
         self.assertIn('name="DayTraderBot"', spec)
+        self.assertIn('name="DayTraderBotCLI"', spec)
         self.assertIn("console=True", spec)
+        self.assertIn("console=False", spec)
+        self.assertIn("gui.py", spec)
         with open(os.path.join(inst, "DayTraderBot.iss"), encoding="utf-8") as fh:
             iss = fh.read()
         self.assertIn('#define MyAppVersion "%s"' % bot.VERSION, iss)
         self.assertIn("DayTraderBot.exe", iss)
+        self.assertIn("DayTraderBotCLI.exe", iss)
         self.assertIn("--pause replay --fixtures --fresh --mode auto", iss)
         self.assertIn("PrivilegesRequired=lowest", iss)
         with open(os.path.join(inst, "build.ps1"), encoding="utf-8") as fh:
             ps1 = fh.read()
         self.assertIn("installer\\DayTraderBot.spec", ps1)
         self.assertIn("DayTraderBot.iss", ps1)
-        self.assertIn("replay --fixtures --fresh --mode auto", ps1)
+        self.assertIn("DayTraderBotCLI.exe\" replay --fixtures --fresh --mode auto", ps1)
         self.assertTrue(os.path.exists(os.path.join(ROOT, ".github", "workflows", "windows-installer.yml")))
+
+
+class Window(unittest.TestCase):
+    """trader-bot/gui.py: the parts that need no screen, and a real window when there is one."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.gui = load("trader-bot", "gui")
+
+    def test_argv_for_each_button(self):
+        g = self.gui
+        self.assertEqual(g.build_argv("reel"), ["replay", "--fixtures", "--fresh", "--mode", "dry-run"])
+        self.assertEqual(g.build_argv("reel", "tsla, aapl", "auto", home="/h"),
+                         ["replay", "--fixtures", "--fresh", "--mode", "auto", "--symbols", "TSLA,AAPL", "--dir", "/h"])
+        self.assertEqual(g.build_argv("reel", "TSLA", "auto", scan=True)[-1], "--scan")
+        self.assertEqual(g.build_argv("run", "nvda;msft", "confirm", "alpaca"),
+                         ["run", "--mode", "confirm", "--broker", "alpaca", "--symbols", "NVDA,MSFT"])
+        self.assertEqual(g.build_argv("status"), ["status", "--events", "30"])
+        with self.assertRaises(ValueError):
+            g.build_argv("run", mode="yolo")
+        with self.assertRaises(ValueError):
+            g.build_argv("run", broker="robinhood")
+        with self.assertRaises(ValueError):
+            g.build_argv("dance")
+
+    def test_prompt_detection_and_describe(self):
+        g = self.gui
+        self.assertTrue(g.looks_like_prompt("Place this order? Reply yes or no: "))
+        self.assertTrue(g.looks_like_prompt("Place this order? Reply yes or no:"))
+        self.assertTrue(g.looks_like_prompt("Press Enter for the menu. "))
+        self.assertFalse(g.looks_like_prompt("10:15  TSLA: TRIGGERED 10:15 AM at $364.18"))
+        self.assertFalse(g.looks_like_prompt(""))
+        self.assertEqual(g.describe(["run", "--mode", "auto", "--dir", "/some/where", "--symbols", "TSLA"]),
+                         "run --mode auto --symbols TSLA")
+
+    def test_cli_command_is_python_bot_py_here(self):
+        cmd = self.gui.cli_command()
+        self.assertEqual(cmd[0], sys.executable)
+        self.assertEqual(os.path.basename(cmd[1]), "bot.py")
+        self.assertEqual(self.gui.VERSION, bot.VERSION)
+
+    def test_runner_streams_a_subprocess_and_takes_a_reply(self):
+        """The Runner against the real bot: a confirm-mode replay answered with yes through stdin."""
+        d = tempfile.mkdtemp(prefix="bot-gui-")
+        try:
+            os.makedirs(os.path.join(d, "trader"))
+            shutil.copy(CFG, os.path.join(d, "trader", "config.json"))
+            with open(os.path.join(ROOT, "trader-bot", "bot.example.json")) as fh:
+                cfg = json.load(fh)
+            cfg["timemachine"]["replays"] = 1000
+            with open(os.path.join(d, "trader", "bot.json"), "w") as fh:
+                json.dump(cfg, fh)
+            r = self.gui.Runner(["replay", "--fixtures", "--fresh", "--mode", "confirm", "--quiet", "--dir", d,
+                                 "--bars", BARS, "--history", HIST, "--date", "2026-10-19", "--symbols", "TSLA"]).start()
+            text, replied, deadline = "", False, time.time() + 120
+            while time.time() < deadline:
+                try:
+                    item = r.queue.get(timeout=1)
+                except Exception:
+                    continue
+                if item is None:
+                    break
+                text += item
+                if not replied and self.gui.looks_like_prompt(text.rsplit("\n", 1)[-1]):
+                    self.assertIn("Place this order? Reply yes or no:", text)
+                    self.assertTrue(r.send("yes"))
+                    replied = True
+            self.assertTrue(replied, text[-500:])
+            self.assertEqual(r.returncode, 0, text[-500:])
+            self.assertIn("ORDER 1 of 1, PAPER account", text)
+            self.assertIn("open   TSLA: 8 x $364.18", text)
+            self.assertFalse(r.alive())
+            self.assertFalse(r.send("too late"))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_the_window_opens_when_there_is_a_screen(self):
+        g = self.gui
+        if g.tk is None or not os.environ.get("DISPLAY") and sys.platform != "win32":
+            self.skipTest("no Tk or no display")
+        d = tempfile.mkdtemp(prefix="bot-gui-")
+        try:
+            root = g.tk.Tk()
+        except g.tk.TclError as e:
+            shutil.rmtree(d, ignore_errors=True)
+            self.skipTest("Tk cannot open a window here: %s" % e)
+        try:
+            root.withdraw()
+            app = g.App(root, home=d)
+            self.assertEqual(app.symbols_var.get(), "TSLA")
+            self.assertEqual(app.mode_var.get(), "dry-run")
+            self.assertIn("no config yet", app.account_var.get())
+            app.mode_var.set("auto")
+            app._explain_mode()
+            self.assertIn("Paper accounts only", app.mode_help.get())
+            app._show("10:15  TSLA: FILLED buy 8\nPlace this order? Reply yes or no: ")
+            self.assertEqual(app.reply_lbl.cget("text"), "Reply (the bot is waiting)")
+            self.assertEqual(app.status_var.get(), "waiting for your yes or no")
+            self.assertIn("FILLED", app.log.get("1.0", "end"))
+            app.launch("status")
+            self.assertTrue(app.runner.alive() or app.runner.returncode is not None)
+            deadline = time.time() + 30
+            while app.runner.alive() and time.time() < deadline:
+                time.sleep(0.2)
+            app._drain()
+            self.assertIn("no session yet", app.log.get("1.0", "end"))
+            self.assertEqual(str(app.btn_reel.cget("state")), "normal")
+        finally:
+            root.destroy()
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class Config(unittest.TestCase):

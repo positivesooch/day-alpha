@@ -1286,7 +1286,18 @@ def cmd_status(a):
     path = os.path.join(workdir, "trader", "state", "bot.json")
     st = read_json(path, required=False)
     if not st:
-        print("no session yet (nothing at %s)" % os.path.relpath(path))
+        # no live session: the newest replay, if there is one
+        replays = os.path.join(workdir, "trader", "replays")
+        days = sorted(os.listdir(replays)) if os.path.isdir(replays) else []
+        for day in reversed(days):
+            alt = os.path.join(replays, day, "trader", "state", "bot.json")
+            st = read_json(alt, required=False)
+            if st:
+                if not a.json:
+                    print("No live session yet; this is the newest replay (%s):\n" % day)
+                break
+    if not st:
+        print("no session yet (nothing at %s)" % path)
         return 1
     if a.json:
         print(json.dumps(st, indent=2, default=str))
@@ -1389,6 +1400,12 @@ def cmd_menu(a, input_fn=None, out=None):
             return 0
 
 
+def cmd_gui(a):
+    sys.path.insert(0, HERE)
+    import gui
+    return gui.main(["--dir", _workdir(a)])
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["--tool"]:
@@ -1440,10 +1457,12 @@ def main(argv=None):
     p.add_argument("--dir")
     p.add_argument("--events", type=int, default=0, help="also print the last N log lines")
     p.add_argument("--json", action="store_true")
-    p = sub.add_parser("menu", help="the interactive menu (what the installed app opens with)")
+    p = sub.add_parser("menu", help="the console menu (what the console exe opens with)")
     p.add_argument("--dir")
     p.add_argument("--once", action="store_true", help="run one choice and return")
     p.add_argument("--no-prompt", action="store_true", help="do not ask for symbols before a run")
+    p = sub.add_parser("gui", help="the window (what the installed app opens with)")
+    p.add_argument("--dir")
 
     a = ap.parse_args(argv)
     if not a.cmd:
@@ -1451,7 +1470,7 @@ def main(argv=None):
         return 1
     try:
         code = {"init": cmd_init, "run": cmd_run, "once": cmd_once, "replay": cmd_replay, "status": cmd_status,
-                "menu": cmd_menu}[a.cmd](a)
+                "menu": cmd_menu, "gui": cmd_gui}[a.cmd](a)
     except BotError as e:
         print("trader-bot: %s" % e, file=sys.stderr)
         code = 1
