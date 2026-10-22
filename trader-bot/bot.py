@@ -1,0 +1,1298 @@
+#!/usr/bin/env python3
+"""trader-bot: the Day Trader skill's tools, run as one loop.
+
+For every symbol on the watch (yours, or the scanner's hits) it runs the
+pack's own tools in the pack's own order, every bar:
+
+    scanner -> news -> entry -> exit -> timemachine -> budget -> risk -> broker
+
+Each stage is the real skill script, called with --json, so every number the
+bot acts on is one the skills would have shown you. The bot adds three things
+the skills do not have: a clock that waits for the next bar, a broker that
+places the ticket (a built-in paper simulator, or Alpaca's REST API), and a
+replay that runs a whole recorded session in a second.
+
+Execution modes, from safest to least:
+
+    dry-run   the full pipeline up to the READY ticket, nothing is placed (default)
+    confirm   the ticket is shown, you type yes or no for that one order
+    auto      the bot says yes itself: PAPER accounts only, it refuses on live
+
+Nothing here is financial advice. Most people who day trade lose money.
+"""
+
+import argparse
+import datetime
+import gzip
+import io
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PACK = os.path.dirname(HERE)
+TOOLS = {
+    "scan": os.path.join(PACK, "trader-scanner", "scan.py"),
+    "news": os.path.join(PACK, "trader-news", "news.py"),
+    "entry": os.path.join(PACK, "trader-entry", "entry.py"),
+    "exit": os.path.join(PACK, "trader-exit", "exit.py"),
+    "timemachine": os.path.join(PACK, "trader-timemachine", "timemachine.py"),
+    "size": os.path.join(PACK, "trader-budget", "size.py"),
+    "check": os.path.join(PACK, "trader-risk", "check.py"),
+    "ticket": os.path.join(PACK, "trader-broker", "ticket.py"),
+}
+CONFIG_EXAMPLE = os.path.join(PACK, "trader-budget", "config.example.json")
+BOT_EXAMPLE = os.path.join(HERE, "bot.example.json")
+FIXTURES = os.path.join(PACK, "tests", "fixtures")
+
+UA = "day-trader-skill/2.0 (trader-bot; python-urllib)"
+CHART_URL = "https://query2.finance.yahoo.com/v8/finance/chart/%s?range=1d&interval=%s&includePrePost=false"
+ALPACA_PAPER = "https://paper-api.alpaca.markets"
+ALPACA_LIVE = "https://api.alpaca.markets"
+MODES = ("dry-run", "confirm", "auto")
+BROKERS = ("sim", "alpaca")
+DONE = {"expired", "skipped", "blocked", "dry-run", "declined", "failed", "open", "closed", "no-order"}
+
+DEFAULTS = {
+    "symbols": ["TSLA"],
+    "scan": {"enabled": False, "watchlist": None, "symbols": None, "limit": None, "every_minutes": 5,
+             "min_price": 5.0, "min_volume": 500000, "max_candidates": 10},
+    "setup": {"kind": "orb", "or_minutes": 15, "interval": "5m", "min_volume_x": None, "stale_minutes": 5},
+    "plan": {"stop": "or-mid", "target": "1R"},
+    "news": {"enabled": False, "hours": 12, "block_tags": []},
+    "timemachine": {"enabled": True, "replays": 10000, "seed": 19, "min_edge_pct": 0.0,
+                    "min_history_triggers": 0, "required": True},
+    "execution": {"mode": "dry-run", "broker": "sim", "max_open_positions": 1, "fill_wait_seconds": 60},
+    "poll_seconds": 20,
+    "bar_grace_seconds": 25,
+}
+
+
+class BotError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------- time (New York, no tz files)
+
+def _nth_sunday(year, month, n):
+    d = datetime.date(year, month, 1)
+    d += datetime.timedelta(days=(6 - d.weekday()) % 7)
+    return d + datetime.timedelta(weeks=n - 1)
+
+
+def eastern_offset(utc):
+    y = utc.year
+    start = datetime.datetime.combine(_nth_sunday(y, 3, 2), datetime.time(7, 0))
+    end = datetime.datetime.combine(_nth_sunday(y, 11, 1), datetime.time(6, 0))
+    naive = utc.replace(tzinfo=None)
+    return -4 if start <= naive < end else -5
+
+
+def to_eastern(utc):
+    return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
+
+
+def eastern_to_utc(et):
+    guess = et - datetime.timedelta(hours=-5)
+    return et - datetime.timedelta(hours=eastern_offset(guess))
+
+
+def parse_now(text):
+    """ISO time -> naive UTC. A time without an offset is New York time."""
+    if not text:
+        return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0, tzinfo=None)
+    t = text.strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.datetime.fromisoformat(t)
+    except ValueError:
+        raise BotError("--now wants a time like \"2026-10-19 10:15\" (New York) or ...Z (UTC)")
+    if dt.tzinfo is None:
+        return eastern_to_utc(dt)
+    return (dt - dt.utcoffset()).replace(tzinfo=None)
+
+
+def ny_text(utc):
+    return to_eastern(utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def ny_hhmm(utc):
+    return to_eastern(utc).strftime("%H:%M")
+
+
+def utc_iso(utc):
+    return utc.replace(microsecond=0).isoformat() + "Z"
+
+
+def hhmm_to_utc(day, hhmm):
+    h, m = hhmm.split(":")
+    return eastern_to_utc(datetime.datetime.combine(day, datetime.time(int(h), int(m))))
+
+
+def from_iso(text):
+    return parse_now(text) if text else None
+
+
+# ---------------------------------------------------------------- files
+
+def read_json(path, required=True, what="file"):
+    if not path or not os.path.exists(path):
+        if required:
+            raise BotError("no %s at %s" % (what, path))
+        return None
+    opener = gzip.open if path.endswith(".gz") else open
+    with opener(path, "rt", encoding="utf-8") as fh:
+        try:
+            return json.load(fh)
+        except ValueError as e:
+            raise BotError("%s is not valid JSON: %s" % (path, e))
+
+
+def write_json(path, doc):
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+def merged(defaults, user):
+    out = {}
+    for k, v in defaults.items():
+        if isinstance(v, dict) and isinstance((user or {}).get(k), dict):
+            out[k] = merged(v, user[k])
+        elif user and k in user:
+            out[k] = user[k]
+        else:
+            out[k] = json.loads(json.dumps(v))
+    for k, v in (user or {}).items():
+        if k not in out:
+            out[k] = v
+    return out
+
+
+def money(x):
+    return "$%s" % format(round(float(x), 2), ",.2f")
+
+
+# ---------------------------------------------------------------- bars
+
+def parse_chart(doc):
+    """Yahoo v8 chart JSON -> {"symbol", "bars": [{"t" (naive UTC start), "o","h","l","c","v"}], "meta"}."""
+    try:
+        res = doc["chart"]["result"][0]
+    except (KeyError, IndexError, TypeError):
+        err = (doc or {}).get("chart", {}).get("error") if isinstance(doc, dict) else None
+        raise BotError("chart has no result%s" % (": %s" % err.get("description") if err else ""))
+    q = res["indicators"]["quote"][0]
+    bars = []
+    for i, ts in enumerate(res.get("timestamp") or []):
+        c = q["close"][i]
+        if c is None:
+            continue
+        bars.append({"t": datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=int(ts)),
+                     "o": q["open"][i] if q["open"][i] is not None else c,
+                     "h": q["high"][i] if q["high"][i] is not None else c,
+                     "l": q["low"][i] if q["low"][i] is not None else c,
+                     "c": c, "v": q["volume"][i] or 0})
+    meta = res.get("meta") or {}
+    return {"symbol": (meta.get("symbol") or "").upper(), "bars": bars, "meta": meta}
+
+
+def fetch_chart(symbol, interval="5m"):
+    req = urllib.request.Request(CHART_URL % (symbol, interval),
+                                 headers={"User-Agent": UA, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise BotError("Yahoo chart %s: HTTP %s" % (symbol, e.code))
+    except (urllib.error.URLError, OSError) as e:
+        raise BotError("Yahoo chart %s: %s" % (symbol, e))
+
+
+class BarSource(object):
+    """Where today's bars come from: Yahoo (live), one chart file, a folder of
+    <SYM>.json files, or a scanner "wall" (one JSON of {SYM: chart}).
+
+    entry_path(sym) is what trader-entry's --offline takes (None means live)."""
+
+    def __init__(self, path=None, workdir=None, interval="5m", fallback=None):
+        self.path, self.workdir, self.interval = path, workdir, interval
+        self.fallback = fallback
+        self.kind = "live"
+        self.wall = None
+        self.cache = {}
+        if path:
+            if os.path.isdir(path):
+                self.kind = "dir"
+            else:
+                doc = read_json(path, what="bars")
+                if isinstance(doc, dict) and "chart" in doc:
+                    self.kind = "file"
+                    self.cache[parse_chart(doc)["symbol"] or "?"] = doc
+                    self.file_symbol = parse_chart(doc)["symbol"]
+                else:
+                    self.kind = "wall"
+                    self.wall = doc
+
+    def describe(self):
+        text = {"live": "Yahoo Finance, 5-minute bars (free, unofficial, can lag)", "file": self.path,
+                "dir": self.path, "wall": self.path}[self.kind]
+        if self.fallback:
+            text += " (other symbols: %s)" % self.fallback.describe()
+        return text
+
+    def has(self, sym):
+        sym = sym.upper()
+        if self.kind == "live":
+            return True
+        if self.kind == "file":
+            return sym == self.file_symbol
+        if self.kind == "dir":
+            return any(os.path.exists(os.path.join(self.path, sym + ext)) for ext in (".json", ".json.gz"))
+        return sym in self.wall
+
+    def raw(self, sym, fresh=False):
+        sym = sym.upper()
+        if not self.has(sym) and self.fallback:
+            return self.fallback.raw(sym, fresh=fresh)
+        if self.kind == "live":
+            if fresh or sym not in self.cache:
+                self.cache[sym] = fetch_chart(sym, self.interval)
+            return self.cache[sym]
+        if self.kind == "file":
+            if sym != self.file_symbol:
+                raise BotError("the bars file is for %s, not %s" % (self.file_symbol, sym))
+            return self.cache[sym]
+        if self.kind == "dir":
+            for name in (sym + ".json", sym + ".json.gz"):
+                p = os.path.join(self.path, name)
+                if os.path.exists(p):
+                    return read_json(p)
+            raise BotError("no %s.json in %s" % (sym, self.path))
+        if sym not in self.wall:
+            raise BotError("%s is not in %s" % (sym, self.path))
+        return self.wall[sym]
+
+    def entry_path(self, sym):
+        sym = sym.upper()
+        if not self.has(sym) and self.fallback:
+            return self.fallback.entry_path(sym)
+        if self.kind == "live":
+            return None
+        if self.kind in ("file", "dir"):
+            return self.path
+        folder = os.path.join(self.workdir, "bars")
+        os.makedirs(folder, exist_ok=True)
+        p = os.path.join(folder, sym + ".json")
+        if not os.path.exists(p):
+            write_json(p, self.raw(sym))
+        return folder
+
+    def bars(self, sym, now, fresh=False):
+        """Closed bars (start + interval <= now), oldest first, plus the last known tick."""
+        chart = parse_chart(self.raw(sym, fresh=fresh))
+        minutes = 1 if self.interval == "1m" else 5
+        step = datetime.timedelta(minutes=minutes)
+        # Yahoo appends the live tick (10:49:45) as if it were a bar; a real bar starts on the interval.
+        aligned = [b for b in chart["bars"] if b["t"].second == 0 and b["t"].minute % minutes == 0]
+        ticks = [b for b in chart["bars"] if b not in aligned and b["t"] <= now]
+        closed = [b for b in aligned if b["t"] + step <= now]
+        last_tick = None
+        rmt = chart["meta"].get("regularMarketTime")
+        if rmt:
+            t = datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=int(rmt))
+            if t <= now:
+                last_tick = {"t": t, "price": chart["meta"].get("regularMarketPrice")}
+        if ticks and (last_tick is None or last_tick.get("price") is None):
+            last_tick = {"t": ticks[-1]["t"], "price": ticks[-1]["c"]}
+        return closed, last_tick
+
+
+class HistorySource(object):
+    """The 60-day 5-minute history the Time Machine replays: one file, or a folder of <SYM>.json(.gz)."""
+
+    def __init__(self, path=None):
+        self.path = path
+
+    def path_for(self, sym):
+        if not self.path:
+            return None
+        if os.path.isdir(self.path):
+            for name in (sym + ".json.gz", sym + ".json", sym + "-60d5m.json.gz", sym + "-60d5m.json"):
+                p = os.path.join(self.path, name)
+                if os.path.exists(p):
+                    return p
+            return ""
+        doc = read_json(self.path, what="history")
+        if parse_chart(doc)["symbol"] not in (sym.upper(), ""):
+            return ""
+        return self.path
+
+
+# ---------------------------------------------------------------- the skills as subprocesses
+
+class Tool(object):
+    def __init__(self, workdir, now_fn, log):
+        self.workdir, self.now_fn, self.log = workdir, now_fn, log
+
+    def run(self, name, args, pin_now=True, now_iso=False, want_json=True):
+        cmd = [sys.executable, TOOLS[name]] + [str(a) for a in args]
+        if pin_now and self.now_fn() is not None:
+            now = self.now_fn()
+            cmd += ["--now", utc_iso(now) if now_iso else ny_text(now)]
+        p = subprocess.run(cmd, cwd=self.workdir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True)
+        out, err = p.stdout, p.stderr
+        if not want_json:
+            return p.returncode, out, err
+        data = None
+        if out.strip():
+            try:
+                data = json.loads(out)
+            except ValueError:
+                start = out.find("{")
+                try:
+                    data = json.loads(out[start:]) if start >= 0 else None
+                except ValueError:
+                    data = None
+        if data is None and p.returncode != 0:
+            raise BotError("%s failed: %s" % (os.path.basename(TOOLS[name]), (err or out).strip()[-400:]))
+        return p.returncode, data, err
+
+
+# ---------------------------------------------------------------- brokers
+
+class SimBroker(object):
+    """A paper broker inside the bot. Fills a market buy at the latest known
+    price, then walks the bracket bar by bar: a bar whose low touches the stop
+    fills the stop (at the open when it gaps through), a bar whose high reaches
+    the target fills the target. If one bar does both, the stop wins: the sim
+    never gives itself the benefit of the doubt."""
+
+    name = "sim"
+
+    def __init__(self, bars):
+        self.bars = bars
+        self.n = 0
+
+    def place(self, order, now):
+        closed, tick = self.bars.bars(order["symbol"], now, fresh=True)
+        price = None
+        if tick and tick.get("price") and closed and tick["t"] >= closed[-1]["t"]:
+            price = float(tick["price"])
+        elif closed:
+            price = float(closed[-1]["c"])
+        if price is None:
+            raise BotError("no price to fill %s" % order["symbol"])
+        self.n += 1
+        return {"broker_id": "sim-%d" % self.n, "filled_qty": int(float(order["qty"])),
+                "filled_price": round(price, 2), "at": now}
+
+    def watch(self, pos, now):
+        closed, _ = self.bars.bars(pos["symbol"], now, fresh=True)
+        entry_t = from_iso(pos.get("entry_bar_t")) or (parse_now(pos["entry_time"]) - datetime.timedelta(minutes=5))
+        since = [b for b in closed if b["t"] > entry_t]
+        for b in since:
+            if b["l"] <= pos["stop"]:
+                px = b["o"] if b["o"] < pos["stop"] else pos["stop"]
+                return {"reason": "stop", "price": round(float(px), 2), "at": b["t"] + datetime.timedelta(minutes=5)}
+            if b["h"] >= pos["target"]:
+                px = b["o"] if b["o"] > pos["target"] else pos["target"]
+                return {"reason": "target", "price": round(float(px), 2), "at": b["t"] + datetime.timedelta(minutes=5)}
+        if closed:
+            pos["last_bar_t"] = utc_iso(closed[-1]["t"])
+            pos["mark"] = round(float(closed[-1]["c"]), 2)
+        return None
+
+    def flatten(self, pos, now):
+        closed, tick = self.bars.bars(pos["symbol"], now, fresh=True)
+        price = float(tick["price"]) if tick and tick.get("price") else (float(closed[-1]["c"]) if closed else None)
+        if price is None:
+            raise BotError("no price to flatten %s" % pos["symbol"])
+        return {"reason": "flat_by", "price": round(price, 2), "at": now}
+
+
+class AlpacaBroker(object):
+    """Alpaca's REST API, straight from the bot. Keys from the environment
+    (ALPACA_API_KEY, ALPACA_SECRET_KEY, the same names the MCP server uses),
+    never from a file in the repo and never printed. Paper unless the pack's
+    config says "paper": false."""
+
+    name = "alpaca"
+
+    def __init__(self, paper):
+        self.base = ALPACA_PAPER if paper else ALPACA_LIVE
+        self.key = os.environ.get("ALPACA_API_KEY") or os.environ.get("APCA_API_KEY_ID")
+        self.secret = os.environ.get("ALPACA_SECRET_KEY") or os.environ.get("APCA_API_SECRET_KEY")
+        if not self.key or not self.secret:
+            raise BotError("Alpaca needs ALPACA_API_KEY and ALPACA_SECRET_KEY in the environment "
+                           "(paper keys from the Alpaca dashboard). Never paste them in a chat.")
+
+    def call(self, method, path, body=None):
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(self.base + path, data=data, method=method, headers={
+            "APCA-API-KEY-ID": self.key, "APCA-API-SECRET-KEY": self.secret,
+            "Content-Type": "application/json", "Accept": "application/json", "User-Agent": UA})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                text = r.read().decode("utf-8")
+                return json.loads(text) if text.strip() else {}
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:300]
+            raise BotError("Alpaca %s %s: HTTP %s %s" % (method, path, e.code, detail))
+        except (urllib.error.URLError, OSError) as e:
+            raise BotError("Alpaca %s %s: %s" % (method, path, e))
+
+    def account(self):
+        return self.call("GET", "/v2/account")
+
+    def place(self, order, now, wait_seconds=60):
+        body = {"symbol": order["symbol"], "qty": str(order["qty"]), "side": order["side"],
+                "type": order.get("type", "market"), "time_in_force": order.get("time_in_force", "day")}
+        if order.get("limit_price") is not None:
+            body["limit_price"] = str(order["limit_price"])
+        if order.get("take_profit_limit_price") is not None or order.get("stop_loss_stop_price") is not None:
+            body["order_class"] = "bracket"
+            body["take_profit"] = {"limit_price": str(order["take_profit_limit_price"])}
+            sl = {"stop_price": str(order["stop_loss_stop_price"])}
+            if order.get("stop_loss_limit_price") is not None:
+                sl["limit_price"] = str(order["stop_loss_limit_price"])
+            body["stop_loss"] = sl
+        res = self.call("POST", "/v2/orders", body)
+        oid = res.get("id")
+        deadline = time.time() + wait_seconds
+        while time.time() < deadline and res.get("status") not in ("filled", "canceled", "rejected", "expired"):
+            time.sleep(2)
+            res = self.call("GET", "/v2/orders/%s" % oid)
+        if res.get("status") != "filled":
+            raise BotError("Alpaca order %s is %s, not filled, after %ds" % (oid, res.get("status"), wait_seconds))
+        return {"broker_id": oid, "filled_qty": int(float(res.get("filled_qty") or order["qty"])),
+                "filled_price": round(float(res.get("filled_avg_price") or 0), 2),
+                "at": datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None, microsecond=0)}
+
+    def watch(self, pos, now):
+        try:
+            self.call("GET", "/v2/positions/%s" % pos["symbol"])
+            return None
+        except BotError as e:
+            if "HTTP 404" not in str(e):
+                raise
+        closed = self.call("GET", "/v2/orders?status=closed&symbols=%s&limit=50&nested=true" % pos["symbol"])
+        for o in closed:
+            legs = [o] + (o.get("legs") or [])
+            for leg in legs:
+                if leg.get("side") == "sell" and leg.get("status") == "filled":
+                    px = float(leg.get("filled_avg_price") or 0)
+                    reason = "target" if leg.get("type") == "limit" else "stop"
+                    return {"reason": reason, "price": round(px, 2), "at": now, "broker_id": leg.get("id")}
+        return {"reason": "closed at the broker", "price": pos.get("mark") or pos["entry"], "at": now}
+
+    def flatten(self, pos, now):
+        res = self.call("DELETE", "/v2/positions/%s?cancel_orders=true" % pos["symbol"])
+        oid = res.get("id")
+        deadline = time.time() + 60
+        while oid and time.time() < deadline and res.get("status") != "filled":
+            time.sleep(2)
+            res = self.call("GET", "/v2/orders/%s" % oid)
+        px = float(res.get("filled_avg_price") or pos.get("mark") or pos["entry"])
+        return {"reason": "flat_by", "price": round(px, 2), "at": now, "broker_id": oid}
+
+
+# ---------------------------------------------------------------- the bot
+
+class Bot(object):
+    def __init__(self, workdir, bot_cfg, mode=None, broker=None, bars=None, history=None, news_dir=None,
+                 scan_offline=None, replay=False, reply_fn=None, out=None, quiet=False):
+        self.workdir = os.path.abspath(workdir)
+        self.trader = os.path.join(self.workdir, "trader")
+        self.cfg = read_json(os.path.join(self.trader, "config.json"),
+                             what="trader/config.json (run: bot.py init)")
+        self.bot = merged(DEFAULTS, bot_cfg or {})
+        ex = self.bot["execution"]
+        self.mode = mode or ex.get("mode") or "dry-run"
+        self.broker_name = broker or ex.get("broker") or "sim"
+        if self.mode not in MODES:
+            raise BotError("mode must be one of %s" % ", ".join(MODES))
+        if self.broker_name not in BROKERS:
+            raise BotError("broker must be one of %s" % ", ".join(BROKERS))
+        self.paper = bool(self.cfg.get("paper", True))
+        if self.mode == "auto" and not self.paper:
+            raise BotError("auto mode is for paper accounts only: trader/config.json says \"paper\": false. "
+                           "Use --mode confirm and say yes to each order yourself, or set paper back to true.")
+        if self.broker_name == "alpaca" and replay:
+            raise BotError("a replay runs on the built-in sim broker, not Alpaca")
+        self.replay = replay
+        self.reply_fn = reply_fn or (lambda prompt: input(prompt))
+        self.out = out or sys.stdout
+        self.quiet = quiet
+        self.now = None
+        self.bars = bars or BarSource(None, self.workdir, self.bot["setup"]["interval"])
+        self.history = history or HistorySource(None)
+        self.news_dir = news_dir
+        self.scan_offline = scan_offline
+        self.tool = Tool(self.workdir, lambda: self.now if (self.replay or self.now is not None) else None, self.log)
+        self.state_path = os.path.join(self.trader, "state", "bot.json")
+        self.state = read_json(self.state_path, required=False) or {}
+        if self.broker_name == "sim":
+            self.broker = SimBroker(self.bars)
+        else:
+            self.broker = AlpacaBroker(self.paper)
+        self.last_scan = None
+
+    # ---- logging and state
+
+    def log(self, text):
+        stamp = ny_hhmm(self.now) if self.now else "--:--"
+        line = "%s  %s" % (stamp, text)
+        self.state.setdefault("events", []).append({"at": ny_text(self.now) if self.now else None, "text": text})
+        if not self.quiet:
+            self.out.write(line + "\n")
+            self.out.flush()
+
+    def note(self, text):
+        """Printed, not recorded: the bar-by-bar heartbeat of a live session."""
+        if not self.quiet and not self.replay:
+            self.out.write("%s  %s\n" % (ny_hhmm(self.now) if self.now else "--:--", text))
+            self.out.flush()
+
+    def save(self):
+        write_json(self.state_path, self.state)
+
+    def fresh_state(self, day):
+        self.state = {"created_by": "trader-bot", "date": day.isoformat(), "mode": self.mode,
+                      "broker": self.broker_name, "paper": self.paper, "replay": self.replay,
+                      "bars": self.bars.describe(), "candidates": {}, "positions": {}, "events": [],
+                      "note": ("Education and tooling, not financial advice. A trade the bot took in dry-run "
+                               "or on a paper account is not money made or lost.")}
+        self.save()
+
+    def cand(self, sym):
+        return self.state["candidates"].setdefault(sym, {"status": "waiting", "stages": {}, "reasons": []})
+
+    def open_positions(self):
+        return [p for p in self.state["positions"].values() if p["status"] == "open"]
+
+    # ---- one tick
+
+    def tick(self, now):
+        self.now = now
+        day = to_eastern(now).date()
+        if self.state.get("date") != day.isoformat():
+            self.fresh_state(day)
+        self.state["last_tick"] = ny_text(now)
+        hhmm = ny_hhmm(now)
+        flat_by = self.cfg.get("flat_by") or "15:55"
+        no_after = self.cfg.get("no_entries_after") or "15:30"
+
+        for pos in self.open_positions():
+            self.watch_position(pos, hhmm >= flat_by)
+
+        if hhmm < no_after and len(self.open_positions()) < int(self.bot["execution"]["max_open_positions"]):
+            self.maybe_scan(now)
+            for sym in list(self.candidates_in_order()):
+                c = self.cand(sym)
+                if c["status"] in DONE:
+                    continue
+                if len(self.open_positions()) >= int(self.bot["execution"]["max_open_positions"]):
+                    break
+                try:
+                    self.consider(sym, c)
+                except BotError as e:
+                    c["reasons"].append(str(e))
+                    c["status"] = "failed"
+                    self.log("%s: %s" % (sym, e))
+        elif hhmm >= no_after:
+            for sym, c in self.state["candidates"].items():
+                if c["status"] not in DONE:
+                    c["status"] = "expired"
+                    c["reasons"].append("no entries after %s" % no_after)
+        self.save()
+
+    def candidates_in_order(self):
+        order = []
+        for s in self.bot.get("symbols") or []:
+            s = s.upper()
+            self.cand(s)
+            order.append(s)
+        for s in self.state["candidates"]:
+            if s not in order:
+                order.append(s)
+        return order
+
+    # ---- scanner
+
+    def maybe_scan(self, now):
+        sc = self.bot["scan"]
+        if not sc.get("enabled"):
+            return
+        every = datetime.timedelta(minutes=int(sc.get("every_minutes") or 5))
+        if self.last_scan is not None and now - self.last_scan < every:
+            return
+        first_bar = hhmm_to_utc(to_eastern(now).date(), "09:30") + datetime.timedelta(
+            minutes=int(self.bot["setup"]["or_minutes"]) + (1 if self.bot["setup"]["interval"] == "1m" else 5))
+        if now < first_bar or ny_hhmm(now) < (self.cfg.get("no_entries_before") or "09:45"):
+            return
+        self.last_scan = now
+        args = ["orb", "--json", "--out", "trader/watchlist.json", "--or-minutes", self.bot["setup"]["or_minutes"],
+                "--min-price", sc.get("min_price") or 0, "--min-volume", sc.get("min_volume") or 0, "--quiet"]
+        if sc.get("watchlist"):
+            args += ["--watchlist", sc["watchlist"]]
+        elif sc.get("symbols"):
+            args += ["--symbols", ",".join(s.upper() for s in sc["symbols"])]
+        elif sc.get("limit"):
+            args += ["--limit", int(sc["limit"])]
+        if self.scan_offline:
+            args += ["--offline", self.scan_offline]
+        try:
+            code, data, err = self.tool.run("scan", args)
+        except BotError as e:
+            self.log("scanner: %s" % e)
+            return
+        hits = (data or {}).get("hits") or []
+        added = []
+        for h in hits[: int(sc.get("max_candidates") or 10)]:
+            sym = h["symbol"].upper()
+            if sym not in self.state["candidates"]:
+                self.cand(sym)["stages"]["scan"] = h
+                added.append(sym)
+        self.state["scan"] = {"at": ny_text(now), "scanned": (data or {}).get("scanned"), "hits": len(hits),
+                              "symbols": [h["symbol"] for h in hits]}
+        self.log("scanner: %s charts, %d opening-range breakouts%s" % (
+            (data or {}).get("scanned", "?"), len(hits), (": " + ", ".join(added)) if added else ""))
+
+    # ---- the pipeline for one symbol
+
+    def consider(self, sym, c):
+        setup = self.bot["setup"]
+        args = ["check", sym, "--json", "--write", "trader/entry.json", "--setup", setup["kind"],
+                "--or-minutes", setup["or_minutes"], "--interval", setup["interval"]]
+        if setup.get("min_volume_x"):
+            args += ["--min-volume-x", setup["min_volume_x"]]
+        if setup["kind"] == "level":
+            level = (c["stages"].get("scan") or {}).get("level") or setup.get("level")
+            if not level:
+                raise BotError("a level setup needs a level (bot.json setup.level or a scanner hit with one)")
+            args += ["--level", level]
+        off = self.bars.entry_path(sym)
+        if off:
+            args += ["--offline", off]
+        code, ent, err = self.tool.run("entry", args)
+        if not ent:
+            raise BotError("entry check printed nothing: %s" % err.strip()[-200:])
+        c["stages"]["entry"] = {k: ent.get(k) for k in ("status", "phase", "reason", "level", "trigger",
+                                                        "last", "opening_range", "minutes_since")}
+        status = ent.get("status")
+        if status == "expired":
+            c["status"] = "expired"
+            c["reasons"].append(ent.get("reason") or "setup expired")
+            self.log("%s: expired (%s)" % (sym, ent.get("reason")))
+            return
+        if status != "triggered":
+            c["status"] = "waiting"
+            self.note("%s: %s" % (sym, (ent.get("reason") or status).rstrip(".")))
+            return
+        trig = ent["trigger"]
+        self.log("%s: TRIGGERED %s at %s (%s bar closed above %s, +%s%%)" % (
+            sym, trig["time"], money(trig["price"]), trig["bar_start"], money(ent["level"]), trig["pct_over"]))
+        if (ent.get("minutes_since") or 0) > int(setup.get("stale_minutes") or 5):
+            c["status"] = "skipped"
+            c["reasons"].append("the trigger is %s minutes old: a late entry is a different trade" % ent["minutes_since"])
+            self.log("%s: skipped, the trigger is %s minutes old" % (sym, ent["minutes_since"]))
+            return
+
+        if not self.news_ok(sym, c):
+            return
+        plan = self.plan(sym, c)
+        if not self.timemachine_ok(sym, c, plan):
+            return
+        self.write_price(sym, plan)
+        orders = self.size(sym, c)
+        if not orders:
+            return
+        if not self.risk_ok(sym, c):
+            return
+        ticket = self.ticket(sym, c)
+        if not ticket:
+            return
+        self.execute(sym, c, ticket, orders["orders"][0], plan)
+
+    def news_ok(self, sym, c):
+        nw = self.bot["news"]
+        if not nw.get("enabled"):
+            return True
+        args = ["--tickers", sym, "--json", "--hours", nw.get("hours") or 12, "--dry-run", "--no-moves"]
+        if not self.cfg.get("sec_user_agent") or "you@example.com" in str(self.cfg.get("sec_user_agent")):
+            args.append("--no-sec")
+        if self.news_dir:
+            args += ["--offline", self.news_dir]
+        try:
+            code, data, err = self.tool.run("news", args, now_iso=True)
+        except BotError as e:
+            c["stages"]["news"] = {"error": str(e)}
+            self.log("%s: news unavailable (%s), going on without it" % (sym, str(e)[:80]))
+            return True
+        items = [i for i in (data or {}).get("items", []) if sym in (i.get("touches") or [i.get("ticker")])]
+        tags = sorted({t for i in items for t in (i.get("tags") or [])})
+        c["stages"]["news"] = {"items": len(items), "tags": tags,
+                               "headlines": [i.get("title") for i in items[:5]]}
+        self.log("%s: news: %d headline%s%s" % (sym, len(items), "" if len(items) == 1 else "s",
+                                                 (", tagged " + ", ".join(tags)) if tags else ""))
+        blocked = sorted(set(tags) & {t.lower() for t in nw.get("block_tags") or []})
+        if blocked:
+            c["status"] = "skipped"
+            c["reasons"].append("news tagged %s (bot.json news.block_tags)" % ", ".join(blocked))
+            self.log("%s: skipped, the news is tagged %s" % (sym, ", ".join(blocked)))
+            return False
+        return True
+
+    def plan(self, sym, c):
+        p = self.bot["plan"]
+        args = ["plan", "--from", "trader/entry.json", "--stop", p.get("stop") or "or-mid",
+                "--target", p.get("target") or "1R", "--write", "trader/plan.json", "--json"]
+        off = self.bars.entry_path(sym)
+        if off and str(p.get("stop", "")).startswith("atr"):
+            args += ["--offline", off]
+        code, plan, err = self.tool.run("exit", args)
+        if not plan or plan.get("stop") is None:
+            raise BotError("exit plan failed: %s" % (err or "").strip()[-200:])
+        c["stages"]["plan"] = {k: plan.get(k) for k in ("entry", "stop", "target", "risk_per_share", "reward_risk",
+                                                        "stop_label", "target_label", "flat_by")}
+        self.log("%s: plan: entry %s, stop %s (%s), target %s (%s), %s a share at risk, flat by %s" % (
+            sym, money(plan["entry"]), money(plan["stop"]), plan.get("stop_label"), money(plan["target"]),
+            plan.get("target_label"), money(plan["risk_per_share"]), plan.get("flat_by")))
+        return plan
+
+    def timemachine_ok(self, sym, c, plan):
+        tm = self.bot["timemachine"]
+        if not tm.get("enabled"):
+            return True
+        hist = self.history.path_for(sym)
+        if hist == "" or (hist is None and self.replay):
+            c["stages"]["timemachine"] = {"skipped": "no history for %s" % sym}
+            if tm.get("required", True):
+                c["status"] = "skipped"
+                c["reasons"].append("no 60-day history to replay (timemachine.required is true)")
+                self.log("%s: skipped, no history for the Time Machine" % sym)
+                return False
+            self.log("%s: no history for the Time Machine, going on without it" % sym)
+            return True
+        args = ["run", "--plan", "trader/plan.json", "--replays", tm.get("replays") or 10000,
+                "--seed", tm.get("seed") or 19, "--write", "trader/timemachine.json", "--json"]
+        if hist:
+            args += ["--offline", hist]
+        code, doc, err = self.tool.run("timemachine", args)
+        if not doc or "mc" not in doc:
+            raise BotError("the Time Machine failed: %s" % (err or "").strip()[-200:])
+        mc, hs = doc["mc"], doc.get("history") or {}
+        c["stages"]["timemachine"] = {"p_target": mc["p_target"], "p_stop": mc["p_stop"],
+                                      "p_neither": mc["p_neither"], "avg_R": mc.get("avg_R"),
+                                      "history": {k: hs.get(k) for k in ("sessions", "triggered", "target", "stop",
+                                                                         "close", "avg_R")},
+                                      "verdict": doc.get("verdict")}
+        edge = round(100 * (mc["p_target"] - mc["p_stop"]), 1)
+        self.log("%s: time machine: target first %.1f%%, stop first %.1f%%, open at the close %.1f%% "
+                 "(%s replays); history: %s of %s fired, %s target / %s stop / %s close. %s" % (
+                     sym, 100 * mc["p_target"], 100 * mc["p_stop"], 100 * mc["p_neither"], mc["replays"],
+                     hs.get("triggered", "?"), hs.get("sessions", "?"), hs.get("target", "?"),
+                     hs.get("stop", "?"), hs.get("close", "?"), doc.get("verdict") or ""))
+        if edge < float(tm.get("min_edge_pct") or 0):
+            c["status"] = "skipped"
+            c["reasons"].append("time machine edge %.1f%% (target first minus stop first) under %.1f%%"
+                                % (edge, float(tm.get("min_edge_pct") or 0)))
+            self.log("%s: skipped, the odds are not there (edge %.1f%%)" % (sym, edge))
+            return False
+        if (hs.get("triggered") or 0) < int(tm.get("min_history_triggers") or 0):
+            c["status"] = "skipped"
+            c["reasons"].append("the setup fired only %s times in the history, under %s"
+                                % (hs.get("triggered"), tm["min_history_triggers"]))
+            self.log("%s: skipped, too little history" % sym)
+            return False
+        return True
+
+    def write_price(self, sym, plan):
+        """A fresh price in trader/prices.json, so trader-risk measures the risk
+        from the higher of the plan's entry and the market now."""
+        try:
+            closed, tick = self.bars.bars(sym, self.now, fresh=True)
+        except BotError as e:
+            self.log("%s: no fresh price (%s); trader-risk measures from the plan" % (sym, e))
+            return
+        price, when = None, None
+        if tick and tick.get("price") and (not closed or tick["t"] >= closed[-1]["t"]):
+            price, when = float(tick["price"]), tick["t"]
+        elif closed:
+            price, when = float(closed[-1]["c"]), closed[-1]["t"] + datetime.timedelta(minutes=5)
+        if price is None:
+            return
+        path = os.path.join(self.trader, "prices.json")
+        doc = read_json(path, required=False) or {}
+        prices, detail = dict(doc.get("prices") or {}), dict(doc.get("detail") or {})
+        prices[sym] = round(price, 2)
+        detail[sym] = {"time": utc_iso(when), "fetched": utc_iso(self.now), "source": "trader-bot/" + self.bars.kind}
+        write_json(path, {"as_of": utc_iso(self.now), "source": "trader-bot", "prices": prices, "detail": detail,
+                          "note": "Written by trader-bot from the bars it watches. Your broker's price is the one that fills."})
+
+    def size(self, sym, c):
+        code, doc, err = self.tool.run("size", ["--plan", "trader/plan.json", "--write", "trader/orders.json", "--json"])
+        orders = (doc or {}).get("orders") or []
+        sizing = (doc or {}).get("sizing") or {}
+        c["stages"]["size"] = {"qty": sizing.get("qty"), "entry": sizing.get("entry"), "entry_from": sizing.get("entry_from"),
+                               "reward_risk": sizing.get("reward_risk"), "max_loss": sizing.get("max_loss"),
+                               "bound_by": sizing.get("bound_by"), "refusal": sizing.get("refusal")}
+        if not orders:
+            c["status"] = "no-order"
+            c["reasons"].append(sizing.get("refusal") or (err or "").strip()[-200:] or "the budget sized zero shares")
+            self.log("%s: no order: %s" % (sym, c["reasons"][-1]))
+            return None
+        o = orders[0]
+        self.log("%s: budget: %s shares (%s), stop-loss %s, take-profit %s, max loss %s" % (
+            sym, o["qty"], money(float(o["qty"]) * float(sizing.get("entry") or o["plan"]["entry"])),
+            o.get("stop_loss_stop_price"), o.get("take_profit_limit_price"), money(o["plan"]["max_loss"])))
+        return doc
+
+    def risk_ok(self, sym, c):
+        code, doc, err = self.tool.run("check", ["--json"])
+        results = (doc or {}).get("results") or []
+        r = results[0] if results else {}
+        c["stages"]["risk"] = {"verdict": r.get("verdict"), "reasons": r.get("reasons"), "warnings": r.get("warnings"),
+                               "max_loss": r.get("max_loss"), "reward_risk": r.get("reward_risk"),
+                               "fingerprint": r.get("fingerprint")}
+        for w in (r.get("warnings") or []) + ((doc or {}).get("warnings") or []):
+            self.log("%s: risk warning: %s" % (sym, w))
+        if r.get("verdict") != "PASS":
+            c["status"] = "blocked"
+            c["reasons"].extend(r.get("reasons") or ["trader-risk blocked it"])
+            self.log("%s: BLOCK by trader-risk: %s" % (sym, "; ".join(r.get("reasons") or ["no reason given"])))
+            return False
+        self.log("%s: risk: PASS. %s" % (sym, " ".join(r.get("info") or [])))
+        return True
+
+    def ticket(self, sym, c):
+        code, doc, err = self.tool.run("ticket", ["show", "--index", "1", "--json"])
+        if not doc or not doc.get("ready"):
+            c["status"] = "blocked"
+            c["reasons"].append((doc or {}).get("status") or "the ticket is not ready")
+            self.log("%s: ticket not ready: %s" % (sym, c["reasons"][-1]))
+            return None
+        c["stages"]["ticket"] = {"plain": doc["plain"], "fingerprint": doc["fingerprint"], "paper": doc["paper"],
+                                 "tool_input": doc["tool_input"]}
+        return doc
+
+    # ---- execution
+
+    def execute(self, sym, c, ticket, order, plan):
+        account = "PAPER" if self.paper else "LIVE"
+        self.log("%s: READY: %s [%s account, %s]" % (sym, ticket["plain"], account, self.broker_name))
+        if self.mode == "dry-run":
+            c["status"] = "dry-run"
+            c["reasons"].append("dry-run: nothing placed")
+            self.log("%s: DRY RUN, nothing placed. The ticket is in trader/orders.json; "
+                     "run with --mode confirm to be asked, or --mode auto on a paper account." % sym)
+            return
+        if self.mode == "confirm":
+            if not self.ask(sym, c, ticket):
+                return
+        else:
+            self.record_auto_yes(ticket, order)
+            self.log("%s: auto mode on a %s account: the bot says yes to this one order" % (sym, account))
+        try:
+            fill = self.broker.place(ticket["tool_input"], self.now) if self.broker_name == "sim" else \
+                self.broker.place(ticket["tool_input"], self.now,
+                                  wait_seconds=int(self.bot["execution"].get("fill_wait_seconds") or 60))
+        except BotError as e:
+            c["status"] = "failed"
+            c["reasons"].append(str(e))
+            self.tool.run("ticket", ["result", "--index", "1", "--status", "failed", "--note", str(e)[:200]],
+                          want_json=False)
+            self.log("%s: order FAILED: %s" % (sym, e))
+            return
+        self.tool.run("ticket", ["result", "--index", "1", "--status", "placed", "--broker-id", fill["broker_id"],
+                                 "--filled-qty", fill["filled_qty"], "--filled-price", fill["filled_price"]],
+                      want_json=False)
+        entry_bar_t = None
+        try:
+            closed, _ = self.bars.bars(sym, self.now)
+            entry_bar_t = utc_iso(closed[-1]["t"]) if closed else None
+        except BotError:
+            pass
+        pos = {"symbol": sym, "qty": fill["filled_qty"], "entry": fill["filled_price"], "entry_time": ny_text(self.now),
+               "entry_bar_t": entry_bar_t, "stop": float(plan["stop"]), "target": float(plan["target"]),
+               "flat_by": plan.get("flat_by") or self.cfg.get("flat_by") or "15:55", "broker_id": fill["broker_id"],
+               "status": "open", "mark": fill["filled_price"], "max_loss": round(
+                   fill["filled_qty"] * (fill["filled_price"] - float(plan["stop"])), 2)}
+        self.state["positions"][sym] = pos
+        c["status"] = "open"
+        self.log("%s: FILLED buy %d at %s (%s), bracket at the broker: stop-loss %s, take-profit %s" % (
+            sym, fill["filled_qty"], money(fill["filled_price"]), fill["broker_id"], money(pos["stop"]),
+            money(pos["target"])))
+
+    def ask(self, sym, c, ticket):
+        code, text, err = self.tool.run("ticket", ["show", "--index", "1"], want_json=False)
+        self.out.write("\n" + text.strip() + "\n\n")
+        self.out.write("trader-bot: a yes here sends this one order to the %s broker (%s account) at once. "
+                       "There is no second Allow once / Deny card outside Claude.\n\n"
+                       % (self.broker_name, "PAPER" if self.paper else "LIVE"))
+        self.out.flush()
+        for attempt in range(3):
+            try:
+                reply = self.reply_fn("Place this order? Reply yes or no: ")
+            except EOFError:
+                reply = ""
+            reply = (reply or "").strip()
+            if not reply or reply.lower().split()[0] in ("no", "n", "skip", "pass"):
+                self.tool.run("ticket", ["decline", "--index", "1", "--reply", reply or "no"], want_json=False)
+                c["status"] = "declined"
+                c["reasons"].append("you said no")
+                self.log("%s: declined, nothing sent" % sym)
+                return False
+            code, text, err = self.tool.run("ticket", ["approve", "--index", "1", "--reply", reply], want_json=False)
+            if code == 0:
+                self.log("%s: your yes is recorded (\"%s\")" % (sym, reply))
+                return True
+            self.out.write(text.strip() + "\n")
+        self.tool.run("ticket", ["decline", "--index", "1", "--reply", "(no clear yes after three tries)"],
+                      want_json=False)
+        c["status"] = "declined"
+        c["reasons"].append("no clear yes after three tries")
+        self.log("%s: no clear yes, nothing sent" % sym)
+        return False
+
+    def record_auto_yes(self, ticket, order):
+        """Auto mode writes its own approval into trader/state/broker.json, in the
+        same shape trader-broker writes a human yes, and says plainly that it was
+        the bot. ticket.py result then accepts the placement, and trader-risk
+        counts the trade's max loss toward the daily limit."""
+        path = os.path.join(self.trader, "state", "broker.json")
+        state = read_json(path, required=False) or {"orders": []}
+        off = eastern_offset(self.now)
+        state.setdefault("orders", []).append({
+            "at": "%s%+03d:00" % (to_eastern(self.now).isoformat(), off), "date": to_eastern(self.now).date().isoformat(),
+            "index": 1, "fingerprint": ticket["fingerprint"], "symbol": order["symbol"], "side": order["side"],
+            "qty": order.get("qty"), "kind": "entry", "max_loss": ticket.get("max_loss"), "stop": ticket.get("stop"),
+            "plain": ticket["plain"], "status": "approved", "auto": True,
+            "reply": "yes (trader-bot auto mode, paper account, bot.json execution.mode=auto; nobody typed this)",
+            "paper": self.paper, "broker": self.broker_name})
+        write_json(path, state)
+
+    # ---- open positions
+
+    def watch_position(self, pos, past_flat_by):
+        sym = pos["symbol"]
+        try:
+            hit = self.broker.watch(pos, self.now)
+            if hit is None and past_flat_by:
+                hit = self.broker.flatten(pos, self.now)
+        except BotError as e:
+            self.log("%s: could not check the position: %s" % (sym, e))
+            return
+        if hit is None:
+            mark = pos.get("mark") or pos["entry"]
+            self.note("%s: open, %d shares from %s, marked %s (stop %s, target %s, flat by %s)" % (
+                sym, pos["qty"], money(pos["entry"]), money(mark), money(pos["stop"]), money(pos["target"]), pos["flat_by"]))
+            return
+        pnl = round((hit["price"] - pos["entry"]) * pos["qty"], 2)
+        pos.update({"status": "closed", "exit": hit["price"], "exit_reason": hit["reason"],
+                    "exit_time": ny_text(hit["at"]) if isinstance(hit.get("at"), datetime.datetime) else ny_text(self.now),
+                    "pnl": pnl, "r": round(pnl / pos["max_loss"], 2) if pos.get("max_loss") else None})
+        self.tool.run("ticket", ["fill", "--symbol", sym, "--side", "sell", "--qty", pos["qty"], "--price", hit["price"]],
+                      want_json=False)
+        self.state["candidates"][sym]["status"] = "closed"
+        label = {"stop": "STOP filled", "target": "TARGET filled", "flat_by": "flat by %s, sold" % pos["flat_by"]}.get(
+            hit["reason"], hit["reason"])
+        self.log("%s: %s at %s: %s%s on %d shares (%s R)" % (
+            sym, label, money(hit["price"]), "+" if pnl >= 0 else "-", money(abs(pnl)), pos["qty"], pos["r"]))
+
+    # ---- summaries
+
+    def summary(self):
+        s = self.state
+        lines = ["", "Session %s: %s mode, %s broker, %s account%s" % (
+            s.get("date"), s.get("mode"), s.get("broker"), "PAPER" if s.get("paper") else "LIVE",
+            " (replay)" if s.get("replay") else "")]
+        for sym, c in s.get("candidates", {}).items():
+            why = ("; ".join(c["reasons"])) if c.get("reasons") else ""
+            lines.append("  %-6s %-9s %s" % (sym, c["status"], why[:110]))
+        total = 0.0
+        for sym, p in s.get("positions", {}).items():
+            if p["status"] == "closed":
+                total += p["pnl"]
+                lines.append("  trade  %s: %d x %s -> %s (%s), %s%s" % (
+                    sym, p["qty"], money(p["entry"]), money(p["exit"]), p["exit_reason"],
+                    "+" if p["pnl"] >= 0 else "-", money(abs(p["pnl"]))))
+            else:
+                mark = p.get("mark") or p["entry"]
+                unreal = round((mark - p["entry"]) * p["qty"], 2)
+                lines.append("  open   %s: %d x %s, marked %s, %s%s unrealised" % (
+                    sym, p["qty"], money(p["entry"]), money(mark), "+" if unreal >= 0 else "-", money(abs(unreal))))
+        closed = [p for p in s.get("positions", {}).values() if p["status"] == "closed"]
+        if closed:
+            lines.append("  realised %s%s on %d trade%s" % ("+" if total >= 0 else "-", money(abs(total)), len(closed),
+                                                             "" if len(closed) == 1 else "s"))
+        lines.append("  Not financial advice. Paper or dry-run results are not money.")
+        return "\n".join(lines)
+
+    # ---- loops
+
+    def run_replay(self, day, start="09:30", end="16:00", step_minutes=5, stop_when_done=True):
+        t = hhmm_to_utc(day, start)
+        last = hhmm_to_utc(day, end)
+        step = datetime.timedelta(minutes=step_minutes)
+        self.fresh_state(day)
+        self.log("replay of %s from %s to %s, %s" % (day.isoformat(), start, end, self.bars.describe()))
+        while t <= last:
+            self.tick(t)
+            if stop_when_done and self.done():
+                break
+            t += step
+        self.state["finished"] = ny_text(self.now)
+        self.save()
+        self.out.write(self.summary() + "\n")
+        return self.state
+
+    def done(self):
+        waiting = [s for s, c in self.state["candidates"].items() if c["status"] not in DONE]
+        scanning = self.bot["scan"].get("enabled") and ny_hhmm(self.now) < (self.cfg.get("no_entries_after") or "15:30")
+        if waiting or scanning:
+            return False
+        for p in self.open_positions():
+            last_bar = from_iso(p.get("last_bar_t") or p.get("entry_bar_t"))
+            if last_bar is None or self.now - last_bar < datetime.timedelta(minutes=20):
+                return False
+            self.log("%s: the bars end at %s; the position is still open, marked at %s" % (
+                p["symbol"], ny_hhmm(last_bar + datetime.timedelta(minutes=5)), money(p.get("mark") or p["entry"])))
+            p["note"] = "open when the data ended"
+        return True
+
+    def run_live(self, until="16:05"):
+        day = to_eastern(parse_now(None)).date()
+        if day.weekday() >= 5:
+            raise BotError("it is the weekend in New York; the market is closed")
+        self.log("live session %s: %s mode, %s broker, %s account. Ctrl-C stops the bot (open positions stay "
+                 "at the broker)." % (day.isoformat(), self.mode, self.broker_name, "PAPER" if self.paper else "LIVE"))
+        if self.broker_name == "alpaca":
+            acct = self.broker.account()
+            self.log("Alpaca account %s, %s, equity %s" % (acct.get("account_number", "?"), acct.get("status", "?"),
+                                                            money(acct.get("equity") or 0)))
+        step = datetime.timedelta(minutes=1 if self.bot["setup"]["interval"] == "1m" else 5)
+        grace = datetime.timedelta(seconds=int(self.bot.get("bar_grace_seconds") or 25))
+        poll = int(self.bot.get("poll_seconds") or 20)
+        while True:
+            now = parse_now(None)
+            if ny_hhmm(now) >= until:
+                break
+            try:
+                self.tick(now)
+            except BotError as e:
+                self.log("tick failed: %s" % e)
+            now = parse_now(None)
+            secs = step.total_seconds()
+            next_bar = now.replace(second=0, microsecond=0) + datetime.timedelta(
+                seconds=secs - (now.minute * 60 + now.second) % secs) + grace
+            wait = (next_bar - now).total_seconds()
+            if self.open_positions():
+                wait = min(wait, poll)
+            if ny_hhmm(now) < "09:30":
+                wait = min(max(wait, 1), 300)
+            time.sleep(max(1.0, wait))
+        self.state["finished"] = ny_text(parse_now(None))
+        self.save()
+        self.out.write(self.summary() + "\n")
+        return self.state
+
+
+# ---------------------------------------------------------------- commands
+
+def _workdir(a):
+    return os.path.abspath(getattr(a, "dir", None) or ".")
+
+
+def _load_bot_cfg(workdir, path=None):
+    p = path or os.path.join(workdir, "trader", "bot.json")
+    doc = read_json(p, required=False)
+    if doc is None:
+        doc = read_json(BOT_EXAMPLE)
+    return doc
+
+
+def cmd_init(a):
+    workdir = _workdir(a)
+    trader = os.path.join(workdir, "trader")
+    os.makedirs(os.path.join(trader, "state"), exist_ok=True)
+    made = []
+    for src, dst in ((CONFIG_EXAMPLE, "config.json"), (BOT_EXAMPLE, "bot.json")):
+        target = os.path.join(trader, dst)
+        if os.path.exists(target) and not a.force:
+            print("kept   %s" % os.path.relpath(target))
+            continue
+        shutil.copy(src, target)
+        made.append(target)
+        print("wrote  %s" % os.path.relpath(target))
+    print("Edit trader/config.json (budget, max loss, the entry window) and trader/bot.json (symbols, mode).")
+    print("Paper trading is on. Try it first on a recorded day: bot.py replay --fixtures")
+    return 0
+
+
+def _bot_from_args(a, replay, bars=None, history=None, news_dir=None, scan_offline=None, reply_fn=None, out=None):
+    workdir = _workdir(a)
+    cfg = _load_bot_cfg(workdir, getattr(a, "bot", None))
+    if getattr(a, "symbols", None):
+        cfg["symbols"] = [s.strip().upper() for s in a.symbols.split(",") if s.strip()]
+    if getattr(a, "scan", False):
+        cfg.setdefault("scan", {})["enabled"] = True
+    return Bot(workdir, cfg, mode=getattr(a, "mode", None), broker=getattr(a, "broker", None), bars=bars,
+               history=history, news_dir=news_dir, scan_offline=scan_offline, replay=replay, reply_fn=reply_fn,
+               out=out, quiet=getattr(a, "quiet", False))
+
+
+def cmd_run(a):
+    bot = _bot_from_args(a, replay=False)
+    bot.run_live(until=a.until)
+    return 0
+
+
+def cmd_once(a):
+    bot = _bot_from_args(a, replay=False)
+    now = parse_now(a.now)
+    bot.tick(now)
+    return 0
+
+
+def cmd_replay(a):
+    workdir = _workdir(a)
+    date = a.date
+    bars_path, hist_path, news_dir, wall = a.bars, a.history, a.news, a.wall
+    if a.fixtures:
+        date = date or "2026-10-19"
+        bars_path = bars_path or os.path.join(FIXTURES, "trader-entry", "TSLA-2026-10-19-5m.json")
+        hist_path = hist_path or os.path.join(FIXTURES, "trader-timemachine", "TSLA-60d5m.json.gz")
+        news_dir = news_dir or os.path.join(FIXTURES, "trader-news")
+        wall = wall or os.path.join(FIXTURES, "trader-scanner", "wall5m-2026-10-19.json.gz")
+    if not date:
+        raise BotError("replay wants --date YYYY-MM-DD (or --fixtures for the reel's day)")
+    try:
+        day = datetime.date.fromisoformat(date)
+    except ValueError:
+        raise BotError("--date wants YYYY-MM-DD")
+    if not bars_path and not wall:
+        raise BotError("replay wants --bars (a Yahoo chart JSON, or a folder of SYMBOL.json) or --wall")
+    if not a.dir:
+        workdir = os.path.join(os.getcwd(), "trader", "replays", day.isoformat())
+    trader = os.path.join(workdir, "trader")
+    if a.fresh and os.path.isdir(trader):
+        shutil.rmtree(trader)
+    os.makedirs(os.path.join(trader, "state"), exist_ok=True)
+    src_cfg = os.path.join(_workdir(a), "trader", "config.json")
+    if not os.path.exists(os.path.join(trader, "config.json")):
+        shutil.copy(src_cfg if os.path.exists(src_cfg) else CONFIG_EXAMPLE, os.path.join(trader, "config.json"))
+    src_bot = a.bot or os.path.join(_workdir(a), "trader", "bot.json")
+    if not os.path.exists(os.path.join(trader, "bot.json")):
+        shutil.copy(src_bot if os.path.exists(src_bot) else BOT_EXAMPLE, os.path.join(trader, "bot.json"))
+    a.dir = workdir
+    if a.fixtures and not a.symbols and not a.scan:
+        a.symbols = "TSLA"
+    fallback = BarSource(wall, workdir) if (wall and bars_path) else None
+    bars = BarSource(bars_path or wall, workdir, fallback=fallback)
+    scan_offline = wall or (bars_path if os.path.isdir(bars_path or "") else None)
+    if a.scan and not scan_offline:
+        raise BotError("--scan in a replay needs --wall (the scanner's recorded charts) or a --bars folder")
+    reply_fn = None
+    if a.reply is not None:
+        replies = iter(a.reply)
+        reply_fn = lambda prompt: next(replies, "no")
+    bot = _bot_from_args(a, replay=True, bars=bars, history=HistorySource(hist_path), news_dir=news_dir,
+                         scan_offline=scan_offline, reply_fn=reply_fn)
+    bot.run_replay(day, start=a.start, end=a.end, stop_when_done=not a.whole_day)
+    if a.json:
+        print(json.dumps(bot.state, indent=2, default=str))
+    return 0
+
+
+def cmd_status(a):
+    workdir = _workdir(a)
+    path = os.path.join(workdir, "trader", "state", "bot.json")
+    st = read_json(path, required=False)
+    if not st:
+        print("no session yet (nothing at %s)" % os.path.relpath(path))
+        return 1
+    if a.json:
+        print(json.dumps(st, indent=2, default=str))
+        return 0
+    bot = Bot.__new__(Bot)
+    bot.state = st
+    print(bot.summary().strip())
+    if a.events:
+        print("")
+        for e in st.get("events", [])[-a.events:]:
+            print("%s  %s" % ((e.get("at") or "")[11:16], e["text"]))
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="trader-bot: the Day Trader skill's tools, run as one loop. "
+                                             "Paper by default. Not financial advice.")
+    sub = ap.add_subparsers(dest="cmd")
+
+    def common(p, replay=False):
+        p.add_argument("--dir", help="the folder with trader/ in it (default: here)")
+        p.add_argument("--bot", help="bot config (default trader/bot.json, else the example)")
+        p.add_argument("--mode", choices=MODES, help="dry-run (default), confirm, or auto (paper only)")
+        p.add_argument("--symbols", help="comma-separated tickers to watch (overrides bot.json)")
+        p.add_argument("--scan", action="store_true", help="add the scanner's opening-range breakouts")
+        p.add_argument("--quiet", action="store_true")
+        if not replay:
+            p.add_argument("--broker", choices=BROKERS, help="sim (built-in paper) or alpaca (REST, keys in env)")
+
+    p = sub.add_parser("init", help="write trader/config.json and trader/bot.json from the examples")
+    p.add_argument("--dir")
+    p.add_argument("--force", action="store_true")
+    p = sub.add_parser("run", help="watch today's session live, bar by bar")
+    common(p)
+    p.add_argument("--until", default="16:05", help="stop at this New York time (default 16:05)")
+    p = sub.add_parser("once", help="one tick now (for a cron or /loop)")
+    common(p)
+    p.add_argument("--now", help='pretend it is this New York time, e.g. "2026-10-19 10:15"')
+    p = sub.add_parser("replay", help="run a recorded session end to end, offline, on the sim broker")
+    common(p, replay=True)
+    p.add_argument("--date", help="YYYY-MM-DD")
+    p.add_argument("--bars", help="a Yahoo 1d/5m chart JSON for the symbol, or a folder of SYMBOL.json")
+    p.add_argument("--wall", help="the scanner's recorded charts ({SYMBOL: chart} JSON, .gz ok)")
+    p.add_argument("--history", help="60d/5m chart JSON for the Time Machine, or a folder of SYMBOL.json.gz")
+    p.add_argument("--news", help="a folder of saved headlines for trader-news --offline")
+    p.add_argument("--fixtures", action="store_true", help="the reel: TSLA on 2026-10-19 from tests/fixtures")
+    p.add_argument("--start", default="09:30")
+    p.add_argument("--end", default="16:00")
+    p.add_argument("--whole-day", action="store_true", help="keep ticking to --end even when nothing is left to do")
+    p.add_argument("--fresh", action="store_true", help="wipe the replay folder first")
+    p.add_argument("--reply", action="append", help="scripted answers for confirm mode (repeatable)")
+    p.add_argument("--json", action="store_true", help="print the session state at the end")
+    p = sub.add_parser("status", help="the current session: candidates, positions, P&L")
+    p.add_argument("--dir")
+    p.add_argument("--events", type=int, default=0, help="also print the last N log lines")
+    p.add_argument("--json", action="store_true")
+
+    a = ap.parse_args(argv)
+    if not a.cmd:
+        ap.print_help()
+        return 1
+    try:
+        return {"init": cmd_init, "run": cmd_run, "once": cmd_once, "replay": cmd_replay, "status": cmd_status}[a.cmd](a)
+    except BotError as e:
+        print("trader-bot: %s" % e, file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\ntrader-bot: stopped. Open positions stay at the broker with their bracket orders; "
+              "check them yourself.", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

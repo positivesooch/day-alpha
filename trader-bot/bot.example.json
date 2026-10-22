@@ -1,0 +1,45 @@
+{
+  "symbols": ["TSLA"],
+  "scan": {
+    "enabled": false,
+    "watchlist": null,
+    "symbols": null,
+    "limit": null,
+    "every_minutes": 5,
+    "min_price": 5.0,
+    "min_volume": 500000,
+    "max_candidates": 10
+  },
+  "setup": {
+    "kind": "orb",
+    "or_minutes": 15,
+    "interval": "5m",
+    "min_volume_x": null,
+    "stale_minutes": 5
+  },
+  "plan": {
+    "stop": "or-mid",
+    "target": "1R"
+  },
+  "news": {
+    "enabled": true,
+    "hours": 12,
+    "block_tags": []
+  },
+  "timemachine": {
+    "enabled": true,
+    "replays": 10000,
+    "seed": 19,
+    "min_edge_pct": 0.0,
+    "min_history_triggers": 0,
+    "required": true
+  },
+  "execution": {
+    "mode": "dry-run",
+    "broker": "sim",
+    "max_open_positions": 1,
+    "fill_wait_seconds": 60
+  },
+  "poll_seconds": 20,
+  "bar_grace_seconds": 25
+}
