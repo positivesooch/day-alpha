@@ -196,11 +196,12 @@ itself, writes "nobody typed this" into the broker log, and works only while
 `trader/config.json` says `"paper": true`: on a live account it refuses to
 start.
 
-**Two brokers.** `sim` is a paper broker inside the bot that fills at the
+**Three brokers.** `sim` is a paper broker inside the bot that fills at the
 latest price and walks the bracket bar by bar (when one bar touches both the
 stop and the target, the stop wins). `alpaca` talks to Alpaca's REST API with
 `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` from the environment, paper unless
-your config says otherwise.
+your config says otherwise. `mt5` drives a MetaTrader 5 terminal, which is
+how funded prop-firm accounts are traded; see the next section.
 
 **Gates in `trader/bot.json`.** A trigger older than `stale_minutes` is a
 different trade and is skipped. News tags in `block_tags` (say,
@@ -213,6 +214,70 @@ decide as they always do. Every skip, block and fill is in
 Everything in "Fine print" applies twice over to a bot. Replay first, then
 dry-run, then confirm, then auto on paper. The bot never flips `"paper"`.
 
+### A prop-firm account on MetaTrader 5
+
+Funded prop firms (FTMO, FundedNext, The5ers, E8 and the like) give you a
+MetaTrader 5 login, a daily loss limit and a maximum drawdown, and end the
+account the moment either is breached. `--broker mt5` runs the same pipeline
+on that account, through MetaQuotes' own `MetaTrader5` Python package and
+the MT5 terminal installed on the same Windows machine:
+
+```bash
+python3 trader-bot/bot.py run --mode confirm --broker mt5     # you type yes per order
+python3 trader-bot/bot.py run --mode auto --broker mt5        # hands off, prop rules enforced
+```
+
+What changes with `mt5` (all of it is in `trader-bot/mt5link.py`):
+
+- **The firm's candles feed the tools.** The bot reads the symbol's M5 rates
+  from the terminal, converts server time to UTC, and hands them to
+  trader-entry, trader-exit and the Time Machine in the chart shape they
+  already read. So the opening range, the trigger, the stop and the odds
+  come from the prices you will actually be filled at, on CFD symbols Yahoo
+  has never heard of. `"use_bars": false` keeps Yahoo for the analysis and
+  uses the terminal only to trade.
+- **Symbols are mapped.** `"symbols": {"TSLA": "TSLA.US"}` names the firm's
+  symbol for each ticker; `"symbol_suffix": ".US"` covers the rest.
+- **Shares become lots.** The budget's `qty` is divided by the symbol's
+  contract size, rounded to the volume step, and capped so the loss at the
+  stop (tick value times ticks to the stop) fits the plan's max loss. If
+  even the smallest lot risks more than that, the order is refused, not
+  rounded up.
+- **One deal, stop and target on the position.** The fill is a market deal
+  with SL and TP set on the position itself, so the terminal closes it even
+  if the bot's machine goes dark. The bot reads the close from the deal
+  history, including the firm's commission, and still flattens at
+  `flat_by` (15:55) if neither side is hit.
+- **The firm's rules are a hard gate.** `"prop"` in `bot.json` holds the
+  account size, `max_daily_loss_pct`, `max_total_drawdown_pct` and a
+  `buffer_pct` (default 20%: the bot treats 80% of each limit as the line).
+  Before every order the live equity is measured against today's starting
+  balance (at the firm's reset time, in server time) and against the account
+  size, and a trade whose loss at the stop would not fit the room left is
+  blocked, after trader-risk has had its say. If equity ever crosses the
+  buffered line with positions open, the bot closes everything it opened
+  (its own magic number only; your manual positions are left alone) and
+  takes no more trades that day.
+- **The account's kind is checked against your config.** Challenge and
+  funded logins report themselves as demo accounts; `"paper": true` is
+  only accepted for those. A login that reports a REAL account refuses to
+  start under `"paper": true`, runs in confirm mode under `"paper": false`,
+  and takes auto mode only with `"allow_auto_on_real": true` set on
+  purpose in `bot.json`.
+
+The password is read from the `MT5_PASSWORD` environment variable, never
+from a file in this repo and never printed. Leave `"login"` empty to use
+whatever account the terminal is already logged in to. `"server_utc_offset_hours"`
+pins the server clock's offset; left empty, the bot measures it from a live
+tick. The scanner still runs on Yahoo's US-equity data; the symbols it finds
+are then traded on the firm's matching CFDs.
+
+A funded account is not a paper account, whatever MT5 calls it: a breached
+rule ends it. Replay, then dry-run, then confirm, then auto on the
+challenge account, before any funded login sees this bot. The `MetaTrader5`
+package exists for Windows only; on other systems `--broker mt5` says so and
+stops.
+
 ### The Windows app
 
 The bot also ships as a Windows program, `DayTraderBot-Setup-<version>.exe`,
@@ -224,7 +289,7 @@ desktop icon and an optional PATH entry. Your settings and logs live in
 `%USERPROFILE%\DayTraderBot\trader\`, and uninstalling leaves them alone.
 
 **`DayTraderBot.exe` is the window.** Type the symbols, pick the mode
-(dry-run, confirm, auto) and the broker (sim, alpaca), tick the scanner if
+(dry-run, confirm, auto) and the broker (sim, alpaca, mt5), tick the scanner if
 you want it, then Replay the reel day, Run today, or Status. The log pane
 streams what the bot does, green for PASS and fills, red for BLOCK and
 stops. In confirm mode the ticket appears in the log and the Reply box
@@ -265,7 +330,12 @@ for every `v*` tag and attaches the installer to the release.
 
 For Alpaca, set `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` in Windows
 (Settings > System > About > Advanced system settings > Environment
-Variables) before you start the app. It never asks for them.
+Variables) before you start the app. It never asks for them. For a prop
+firm on MetaTrader 5, install the firm's MT5 terminal, log it in, set
+`MT5_PASSWORD` the same way (or leave `"login"` empty in `bot.json` and
+let the open terminal's login stand), and pick the `mt5` broker; the build
+script bundles the `MetaTrader5` package so the installed app needs nothing
+else. Picking auto mode with `mt5` asks you once more before it starts.
 
 ## Fine print
 

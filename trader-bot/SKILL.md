@@ -5,16 +5,19 @@ description: >-
   scanner finds opening-range breakouts (or you name the tickers), the entry
   timer calls the trigger, the exit planner sets the stop and the target, the
   Time Machine replays the odds, the budget sizes the order, the risk manager
-  passes or blocks it, and a broker places it: a built-in paper simulator, or
-  Alpaca's REST API. Three modes: dry-run stops at the READY ticket (default),
-  confirm asks you to type yes for each order, auto says yes itself on PAPER
-  accounts only and refuses on a live one. Replays any recorded session
-  offline in a second, including the reel's TSLA day from the test fixtures.
-  Watches open positions, records fills, and is flat by the close. Use when
-  the user says "run the bot", "trade this for me", "automate the pipeline",
-  "paper trade today", "watch these tickers and take the breakout", "backtest
-  the bot on yesterday", "replay the session", or "start the trading bot".
-argument-hint: "[run|replay|once|status|init] [--mode dry-run|confirm|auto] [--symbols TSLA,AAPL]"
+  passes or blocks it, and a broker places it: a built-in paper simulator,
+  Alpaca's REST API, or a MetaTrader 5 terminal for funded prop-firm accounts
+  (FTMO-style daily loss and drawdown rules enforced, lots sized to the max
+  loss, emergency flatten). Three modes: dry-run stops at the READY ticket
+  (default), confirm asks you to type yes for each order, auto says yes itself
+  on PAPER accounts only and refuses on a live one. Replays any recorded
+  session offline in a second, including the reel's TSLA day from the test
+  fixtures. Watches open positions, records fills, and is flat by the close.
+  Use when the user says "run the bot", "trade this for me", "automate the
+  pipeline", "paper trade today", "watch these tickers and take the breakout",
+  "backtest the bot on yesterday", "replay the session", "start the trading
+  bot", "connect MT5", or "trade my prop firm account".
+argument-hint: "[run|replay|once|status|init] [--mode dry-run|confirm|auto] [--broker sim|alpaca|mt5] [--symbols TSLA,AAPL]"
 ---
 
 # trader-bot
@@ -36,6 +39,7 @@ python3 "${CLAUDE_SKILL_DIR}/bot.py" replay --fixtures --scan --mode auto  # let
 python3 "${CLAUDE_SKILL_DIR}/bot.py" run --symbols TSLA,AAPL               # today, live, dry-run: nothing is placed
 python3 "${CLAUDE_SKILL_DIR}/bot.py" run --mode confirm                    # live, asks you yes or no per order
 python3 "${CLAUDE_SKILL_DIR}/bot.py" run --mode auto --broker alpaca       # live PAPER account, Alpaca, hands off
+python3 "${CLAUDE_SKILL_DIR}/bot.py" run --mode auto --broker mt5          # a prop-firm account on MetaTrader 5, rules enforced
 python3 "${CLAUDE_SKILL_DIR}/bot.py" once --now "2026-10-19 10:15"         # one tick (for a cron or /loop)
 python3 "${CLAUDE_SKILL_DIR}/bot.py" status --events 20                    # candidates, positions, P&L, the log
 ```
@@ -45,10 +49,11 @@ python3 "${CLAUDE_SKILL_DIR}/bot.py" status --events 20                    # can
 | file | what |
 | --- | --- |
 | `trader/config.json` | the pack's limits: budget, max loss, daily loss, entry window, `flat_by`, `paper` |
-| `trader/bot.json` | the bot's own settings: symbols, scanner, setup, stop and target rules, gates, mode, broker |
+| `trader/bot.json` | the bot's own settings: symbols, scanner, setup, stop and target rules, gates, mode, broker, the `mt5` block (login, symbol map, the firm's rules) |
 | `trader/watchlist.json`, `entry.json`, `plan.json`, `timemachine.json`, `orders.json`, `prices.json` | written by the skills as the bot calls them, one symbol at a time |
 | `trader/state/risk.json`, `trader/state/broker.json`, `trader/portfolio.json` | trader-risk's verdicts, every yes and fill, cash and shares, exactly as the skills keep them |
 | `trader/state/bot.json` | the session: each candidate's stage results and why it was taken or not, positions, P&L, the event log |
+| `trader/state/mt5.json` | with the `mt5` broker: the firm's day start balance and the account size the rules are measured from |
 | `trader/replays/<date>/` | a replay's own `trader/` folder, so it never touches a live session |
 
 ## The loop
@@ -71,7 +76,10 @@ every symbol that is not done yet:
    60-day history to replay and `required` true, it is skipped too.
 6. **Budget**: a fresh price goes to `trader/prices.json`, then `size.py`
    sizes the bracket order to the max loss and the budget.
-7. **Risk**: `check.py`. BLOCK ends it, with the reason in the log.
+7. **Risk**: `check.py`. BLOCK ends it, with the reason in the log. With
+   the `mt5` broker the prop firm's rules are measured on the live account
+   next: the trade's loss at the stop has to fit the room left under the
+   daily loss limit and the max drawdown, buffer included.
 8. **Broker**: `ticket.py show`. Only a READY ticket goes further, by mode.
 
 While a position is open the bot watches it every `poll_seconds`, records
@@ -91,7 +99,7 @@ Outside Claude there is no "Allow once / Deny" card, so in `confirm` mode
 your typed yes is the last gate before the broker. The bot says so above
 the prompt.
 
-## The two brokers
+## The three brokers
 
 - **`sim`** (default): a paper broker inside the bot. Fills a market buy at
   the latest price, then walks the bracket bar by bar: a bar whose low
@@ -104,6 +112,24 @@ the prompt.
   never from a file in the repo and never printed. The bot sends the bracket
   as Alpaca's `take_profit` / `stop_loss` legs, waits for the fill, watches
   the position, and at `flat_by` closes it with `cancel_orders=true`.
+- **`mt5`**: a MetaTrader 5 terminal on the same Windows machine, through
+  MetaQuotes' `MetaTrader5` package (`mt5link.py`). This is how funded
+  prop-firm accounts (FTMO, FundedNext, The5ers, E8 ...) are traded. The
+  bot reads the firm's own M5 candles and serves them to the tools in the
+  chart shape they read, maps tickers to the firm's symbols
+  (`"symbols": {"TSLA": "TSLA.US"}`, `"symbol_suffix"`), turns the budget's
+  shares into lots capped so the loss at the stop fits the plan's max loss,
+  sends one market deal with SL and TP on the position, reads the close
+  (and the commission) from the deal history, and flattens at `flat_by`.
+  The firm's rules in `bot.json` (`"prop"`: `initial_balance`,
+  `max_daily_loss_pct`, `max_total_drawdown_pct`, `buffer_pct`,
+  `daily_reset_server_time`) gate every order; when equity crosses the
+  buffered line the bot closes everything it opened (its magic number only)
+  and halts for the day. The password comes from `MT5_PASSWORD`; leave
+  `"login"` empty to use the terminal's own login. Challenge and funded
+  logins report as demo accounts, which `"paper": true` accepts; a REAL
+  account refuses under `"paper": true`, runs in confirm mode under
+  `"paper": false`, and takes auto mode only with `"allow_auto_on_real"`.
 
 Fills go through `ticket.py result` and `ticket.py fill`, so the pack's own
 log, portfolio and daily-loss count stay right, and `/trader-risk` sees the
@@ -164,7 +190,8 @@ open, marked at $366.68 (+$20.00 unrealised). Nothing about that is money.
 3. Run live in `dry-run` for a few sessions. `bot.py status --events 50`
    shows what it would have done.
 4. Then `confirm` mode, then `auto` on a paper account with the sim broker,
-   then `auto` with `--broker alpaca` on Alpaca's paper account.
+   then `auto` with `--broker alpaca` on Alpaca's paper account, or with
+   `--broker mt5` on the prop firm's challenge account before any funded one.
 5. Going live is the user's own decision, made by editing `"paper"` in
    their own config. The bot never does it, and never runs auto mode there.
 
@@ -174,7 +201,9 @@ open, marked at $366.68 (+$20.00 unrealised). Nothing about that is money.
   on a ticket trader-risk did not pass today.
 - Never turns a doubtful reply into a yes: `ticket.py approve` decides.
 - Never retries a failed order without a new check.
-- Never asks for, stores or prints API keys. They live in the environment.
+- Never asks for, stores or prints API keys or the MT5 password. They live in the environment.
+- Never touches a position it did not open (MT5: other magic numbers are left alone), and never loosens the
+  firm's limits: `buffer_pct` can only make them tighter.
 - Never shorts, trades options, crypto or on margin: the pack's config
   blocks them and trader-risk enforces it.
 - Never promises a fill price, a win rate or a profit.
