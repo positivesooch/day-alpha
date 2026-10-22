@@ -27,6 +27,7 @@ import gzip
 import io
 import json
 import os
+import runpy
 import shutil
 import subprocess
 import sys
@@ -34,7 +35,15 @@ import time
 import urllib.error
 import urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+VERSION = "2.1.0"
+
+# Frozen (the Windows build made by installer/DayTraderBot.spec): the pack's
+# folders are bundled under <bundle>/pack, and the exe itself is the Python
+# that runs the tool scripts (see run_tool and Tool.run). Otherwise this file
+# sits in trader-bot/ inside the pack and the system python3 runs the tools.
+FROZEN = bool(getattr(sys, "frozen", False))
+BUNDLE = getattr(sys, "_MEIPASS", None) or (os.path.dirname(sys.executable) if FROZEN else None)
+HERE = os.path.join(BUNDLE, "pack", "trader-bot") if FROZEN else os.path.dirname(os.path.abspath(__file__))
 PACK = os.path.dirname(HERE)
 TOOLS = {
     "scan": os.path.join(PACK, "trader-scanner", "scan.py"),
@@ -49,6 +58,19 @@ TOOLS = {
 CONFIG_EXAMPLE = os.path.join(PACK, "trader-budget", "config.example.json")
 BOT_EXAMPLE = os.path.join(HERE, "bot.example.json")
 FIXTURES = os.path.join(PACK, "tests", "fixtures")
+README = os.path.join(BUNDLE if FROZEN else PACK, "README.md")
+
+
+def default_home():
+    """Where trader/ lives when no --dir is given: the current folder for the
+    script, a folder in the user's home for the installed app (Program Files
+    is not writable). DAYTRADERBOT_HOME overrides both."""
+    env = os.environ.get("DAYTRADERBOT_HOME")
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    if FROZEN:
+        return os.path.join(os.path.expanduser("~"), "DayTraderBot")
+    return os.path.abspath(".")
 
 UA = "day-trader-skill/2.0 (trader-bot; python-urllib)"
 CHART_URL = "https://query2.finance.yahoo.com/v8/finance/chart/%s?range=1d&interval=%s&includePrePost=false"
@@ -340,18 +362,49 @@ class HistorySource(object):
 
 # ---------------------------------------------------------------- the skills as subprocesses
 
+def tool_command(script):
+    """The command that runs one of the pack's scripts: python3 when this is a
+    script, the frozen exe itself (which answers --tool) when it is the app."""
+    if FROZEN:
+        return [sys.executable, "--tool", script]
+    return [sys.executable, script]
+
+
+def run_tool(script, args):
+    """Run a pack script in this process as if it were `python3 script args`.
+    The frozen exe calls itself this way, so the tools need no Python installed."""
+    if not os.path.exists(script):
+        print("trader-bot: no tool at %s" % script, file=sys.stderr)
+        return 2
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, AttributeError):
+                pass
+    sys.argv = [script] + list(args)
+    sys.path.insert(0, os.path.dirname(script))
+    try:
+        runpy.run_path(script, run_name="__main__")
+    except SystemExit as e:
+        code = e.code
+        return 0 if code is None else (code if isinstance(code, int) else 1)
+    return 0
+
+
 class Tool(object):
     def __init__(self, workdir, now_fn, log):
         self.workdir, self.now_fn, self.log = workdir, now_fn, log
 
     def run(self, name, args, pin_now=True, now_iso=False, want_json=True):
-        cmd = [sys.executable, TOOLS[name]] + [str(a) for a in args]
+        cmd = tool_command(TOOLS[name]) + [str(a) for a in args]
         if pin_now and self.now_fn() is not None:
             now = self.now_fn()
             cmd += ["--now", utc_iso(now) if now_iso else ny_text(now)]
-        p = subprocess.run(cmd, cwd=self.workdir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           universal_newlines=True)
-        out, err = p.stdout, p.stderr
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        p = subprocess.run(cmd, cwd=self.workdir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        out = p.stdout.decode("utf-8", "replace")
+        err = p.stderr.decode("utf-8", "replace")
         if not want_json:
             return p.returncode, out, err
         data = None
@@ -515,7 +568,7 @@ class Bot(object):
         self.workdir = os.path.abspath(workdir)
         self.trader = os.path.join(self.workdir, "trader")
         self.cfg = read_json(os.path.join(self.trader, "config.json"),
-                             what="trader/config.json (run: bot.py init)")
+                             what="trader/config.json (run: %s init)" % ("DayTraderBot" if FROZEN else "bot.py"))
         self.bot = merged(DEFAULTS, bot_cfg or {})
         ex = self.bot["execution"]
         self.mode = mode or ex.get("mode") or "dry-run"
@@ -1112,7 +1165,7 @@ class Bot(object):
 # ---------------------------------------------------------------- commands
 
 def _workdir(a):
-    return os.path.abspath(getattr(a, "dir", None) or ".")
+    return os.path.abspath(getattr(a, "dir", None) or default_home())
 
 
 def _load_bot_cfg(workdir, path=None):
@@ -1141,8 +1194,20 @@ def cmd_init(a):
     return 0
 
 
+def _ensure_config(workdir):
+    """A first run gets the example limits (paper, $5,000 budget, $50 max loss) and is told so."""
+    target = os.path.join(workdir, "trader", "config.json")
+    if not os.path.exists(target):
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copy(CONFIG_EXAMPLE, target)
+        print("No trader/config.json yet: wrote the example limits to %s (paper trading, $5,000 budget, "
+              "$50 max loss a trade). Edit it to taste." % target)
+    return target
+
+
 def _bot_from_args(a, replay, bars=None, history=None, news_dir=None, scan_offline=None, reply_fn=None, out=None):
     workdir = _workdir(a)
+    _ensure_config(workdir)
     cfg = _load_bot_cfg(workdir, getattr(a, "bot", None))
     if getattr(a, "symbols", None):
         cfg["symbols"] = [s.strip().upper() for s in a.symbols.split(",") if s.strip()]
@@ -1184,16 +1249,16 @@ def cmd_replay(a):
         raise BotError("--date wants YYYY-MM-DD")
     if not bars_path and not wall:
         raise BotError("replay wants --bars (a Yahoo chart JSON, or a folder of SYMBOL.json) or --wall")
-    if not a.dir:
-        workdir = os.path.join(os.getcwd(), "trader", "replays", day.isoformat())
+    home = _workdir(a)
+    workdir = os.path.abspath(a.into) if a.into else os.path.join(home, "trader", "replays", day.isoformat())
     trader = os.path.join(workdir, "trader")
     if a.fresh and os.path.isdir(trader):
         shutil.rmtree(trader)
     os.makedirs(os.path.join(trader, "state"), exist_ok=True)
-    src_cfg = os.path.join(_workdir(a), "trader", "config.json")
+    src_cfg = os.path.join(home, "trader", "config.json")
     if not os.path.exists(os.path.join(trader, "config.json")):
         shutil.copy(src_cfg if os.path.exists(src_cfg) else CONFIG_EXAMPLE, os.path.join(trader, "config.json"))
-    src_bot = a.bot or os.path.join(_workdir(a), "trader", "bot.json")
+    src_bot = a.bot or os.path.join(home, "trader", "bot.json")
     if not os.path.exists(os.path.join(trader, "bot.json")):
         shutil.copy(src_bot if os.path.exists(src_bot) else BOT_EXAMPLE, os.path.join(trader, "bot.json"))
     a.dir = workdir
@@ -1236,9 +1301,105 @@ def cmd_status(a):
     return 0
 
 
+MENU = [
+    ("1", "Set up: write trader\\config.json and trader\\bot.json (keeps existing files)", ["init"]),
+    ("2", "Replay the reel day (TSLA, Mon 2026-10-19), dry-run: the method, nothing placed",
+     ["replay", "--fixtures", "--fresh"]),
+    ("3", "Replay the reel day, auto mode: the paper sim takes the trade",
+     ["replay", "--fixtures", "--fresh", "--mode", "auto"]),
+    ("4", "Replay the reel day with the scanner picking from 231 recorded charts",
+     ["replay", "--fixtures", "--fresh", "--scan", "--mode", "auto"]),
+    ("5", "Run today, live, dry-run: watch the symbols, place nothing", ["run"]),
+    ("6", "Run today, live, confirm mode: you type yes or no for each order", ["run", "--mode", "confirm"]),
+    ("7", "Run today, live, auto mode on the paper sim", ["run", "--mode", "auto", "--broker", "sim"]),
+    ("8", "Run today, live, auto mode on your Alpaca PAPER account (keys in the environment)",
+     ["run", "--mode", "auto", "--broker", "alpaca"]),
+    ("9", "Status of the current session", ["status", "--events", "15"]),
+    ("e", "Edit the settings (opens the trader folder)", None),
+    ("q", "Quit", None),
+]
+
+
+def open_folder(path):
+    if hasattr(os, "startfile"):
+        os.startfile(path)  # noqa: Windows only
+        return True
+    opener = shutil.which("xdg-open") or shutil.which("open")
+    if opener:
+        subprocess.Popen([opener, path])
+        return True
+    return False
+
+
+def cmd_menu(a, input_fn=None, out=None):
+    """The console menu the installed app shows when it is double-clicked."""
+    ask = input_fn or input
+    out = out or sys.stdout
+    home = _workdir(a)
+    os.makedirs(os.path.join(home, "trader"), exist_ok=True)
+    once = getattr(a, "once", False)
+    while True:
+        cfg = read_json(os.path.join(home, "trader", "config.json"), required=False) or {}
+        out.write("\nDay Trader Bot %s   paper trading%s   data folder: %s\n" % (
+            VERSION, "" if cfg.get("paper", True) else " OFF (LIVE account in your config)", home))
+        out.write("Education and tooling, not financial advice. Most people who day trade lose money.\n\n")
+        for key, label, _ in MENU:
+            out.write("  %s  %s\n" % (key, label))
+        out.flush()
+        try:
+            choice = ask("\nChoose: ").strip().lower()
+        except EOFError:
+            choice = "q"
+        if choice in ("q", "quit", "exit", ""):
+            return 0
+        pick = {k: argv for k, _, argv in MENU}.get(choice)
+        if choice == "e":
+            paths = [os.path.join(home, "trader", f) for f in ("config.json", "bot.json")]
+            if not all(os.path.exists(p) for p in paths):
+                main(["init", "--dir", home])
+            out.write("\n".join(paths) + "\n")
+            if not open_folder(os.path.join(home, "trader")):
+                out.write("Open those two files in any text editor.\n")
+        elif pick is None:
+            out.write("Pick a number from the list, or q.\n")
+            continue
+        else:
+            argv = list(pick) + ["--dir", home]
+            if pick[0] == "run" and not getattr(a, "no_prompt", False):
+                try:
+                    syms = ask("Symbols, comma separated (Enter keeps trader\\bot.json): ").strip()
+                except EOFError:
+                    syms = ""
+                if syms:
+                    argv += ["--symbols", syms.upper()]
+            out.write("\n> DayTraderBot %s\n\n" % " ".join(argv[:-2]))
+            out.flush()
+            try:
+                code = main(argv)
+            except KeyboardInterrupt:
+                code = 130
+                out.write("\nStopped. Open positions stay at the broker with their bracket orders.\n")
+            if code not in (0, None):
+                out.write("\n(exit code %s)\n" % code)
+        if once:
+            return 0
+        try:
+            ask("\nPress Enter for the menu. ")
+        except EOFError:
+            return 0
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="trader-bot: the Day Trader skill's tools, run as one loop. "
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["--tool"]:
+        return run_tool(argv[1], argv[2:]) if len(argv) > 1 else 2
+    if not argv and FROZEN:
+        argv = ["menu"]
+    ap = argparse.ArgumentParser(prog="DayTraderBot" if FROZEN else None,
+                                 description="trader-bot: the Day Trader skill's tools, run as one loop. "
                                              "Paper by default. Not financial advice.")
+    ap.add_argument("--version", action="version", version="Day Trader Bot %s" % VERSION)
+    ap.add_argument("--pause", action="store_true", help="wait for Enter before closing (Start menu shortcuts)")
     sub = ap.add_subparsers(dest="cmd")
 
     def common(p, replay=False):
@@ -1268,6 +1429,7 @@ def main(argv=None):
     p.add_argument("--history", help="60d/5m chart JSON for the Time Machine, or a folder of SYMBOL.json.gz")
     p.add_argument("--news", help="a folder of saved headlines for trader-news --offline")
     p.add_argument("--fixtures", action="store_true", help="the reel: TSLA on 2026-10-19 from tests/fixtures")
+    p.add_argument("--into", metavar="FOLDER", help="the replay's own folder (default <dir>/trader/replays/<date>)")
     p.add_argument("--start", default="09:30")
     p.add_argument("--end", default="16:00")
     p.add_argument("--whole-day", action="store_true", help="keep ticking to --end even when nothing is left to do")
@@ -1278,20 +1440,31 @@ def main(argv=None):
     p.add_argument("--dir")
     p.add_argument("--events", type=int, default=0, help="also print the last N log lines")
     p.add_argument("--json", action="store_true")
+    p = sub.add_parser("menu", help="the interactive menu (what the installed app opens with)")
+    p.add_argument("--dir")
+    p.add_argument("--once", action="store_true", help="run one choice and return")
+    p.add_argument("--no-prompt", action="store_true", help="do not ask for symbols before a run")
 
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()
         return 1
     try:
-        return {"init": cmd_init, "run": cmd_run, "once": cmd_once, "replay": cmd_replay, "status": cmd_status}[a.cmd](a)
+        code = {"init": cmd_init, "run": cmd_run, "once": cmd_once, "replay": cmd_replay, "status": cmd_status,
+                "menu": cmd_menu}[a.cmd](a)
     except BotError as e:
         print("trader-bot: %s" % e, file=sys.stderr)
-        return 1
+        code = 1
     except KeyboardInterrupt:
         print("\ntrader-bot: stopped. Open positions stay at the broker with their bracket orders; "
               "check them yourself.", file=sys.stderr)
-        return 130
+        code = 130
+    if a.pause:
+        try:
+            input("\nPress Enter to close. ")
+        except EOFError:
+            pass
+    return code
 
 
 if __name__ == "__main__":

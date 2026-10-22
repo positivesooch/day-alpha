@@ -4,6 +4,7 @@ import io
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -91,7 +92,7 @@ class Replay(unittest.TestCase):
             shutil.rmtree(work)
         os.makedirs(os.path.join(work, "trader"))
         shutil.copy(config or CFG, os.path.join(work, "trader", "config.json"))
-        argv = ["replay", "--dir", work, "--bot", self.botcfg, "--date", "2026-10-19", "--bars", bars,
+        argv = ["replay", "--into", work, "--bot", self.botcfg, "--date", "2026-10-19", "--bars", bars,
                 "--history", HIST, "--news", NEWS, "--symbols", "TSLA", "--quiet"] + list(extra)
         code, out, err = run(argv)
         with open(os.path.join(work, "trader", "state", "bot.json")) as fh:
@@ -146,7 +147,7 @@ class Replay(unittest.TestCase):
         work = os.path.join(self.d, "replay")
         os.makedirs(os.path.join(work, "trader"))
         shutil.copy(live, os.path.join(work, "trader", "config.json"))
-        code, out, err = run(["replay", "--dir", work, "--bot", self.botcfg, "--date", "2026-10-19", "--bars", BARS,
+        code, out, err = run(["replay", "--into", work, "--bot", self.botcfg, "--date", "2026-10-19", "--bars", BARS,
                               "--history", HIST, "--mode", "auto", "--quiet"])
         self.assertEqual(code, 1)
         self.assertIn("paper accounts only", err)
@@ -325,6 +326,111 @@ class Bars(unittest.TestCase):
                 bot.BarSource(BARS, d).raw("AAPL")
         finally:
             shutil.rmtree(d, ignore_errors=True)
+
+
+class App(unittest.TestCase):
+    """The installed-app paths: the exe runs the tools itself, data lives in a home folder, a menu opens."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="bot-app-")
+        self.old_home = os.environ.get("DAYTRADERBOT_HOME")
+        os.environ["DAYTRADERBOT_HOME"] = self.d
+
+    def tearDown(self):
+        if self.old_home is None:
+            os.environ.pop("DAYTRADERBOT_HOME", None)
+        else:
+            os.environ["DAYTRADERBOT_HOME"] = self.old_home
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_tool_dispatch_runs_a_pack_script_in_process(self):
+        code, out, err = run(["--tool", bot.TOOLS["exit"], "plan", "--symbol", "TSLA", "--entry", "364.18",
+                              "--or-high", "362.18", "--or-low", "354.47", "--stop", "or-mid", "--target", "1R",
+                              "--date", "2026-10-19", "--json"])
+        self.assertEqual(code, 0, err)
+        plan = json.loads(out)
+        self.assertEqual((plan["stop"], plan["target"]), (358.32, 370.04))
+        code, out, err = run(["--tool", os.path.join(self.d, "missing.py")])
+        self.assertEqual(code, 2)
+        self.assertEqual(run(["--tool"])[0], 2)
+
+    def test_tool_command_uses_python_here_and_the_exe_when_frozen(self):
+        self.assertEqual(bot.tool_command("x.py"), [sys.executable, "x.py"])
+        old = bot.FROZEN
+        bot.FROZEN = True
+        try:
+            self.assertEqual(bot.tool_command("x.py"), [sys.executable, "--tool", "x.py"])
+        finally:
+            bot.FROZEN = old
+
+    def test_home_folder_comes_from_the_environment_and_is_the_default_dir(self):
+        self.assertEqual(bot.default_home(), self.d)
+        code, out, err = run(["init"])
+        self.assertEqual(code, 0)
+        self.assertTrue(os.path.exists(os.path.join(self.d, "trader", "bot.json")))
+        os.environ.pop("DAYTRADERBOT_HOME")
+        self.assertEqual(bot.default_home(), os.path.abspath("."))
+
+    def test_a_first_run_writes_the_example_limits(self):
+        with redirect_stdout(io.StringIO()) as out:
+            path = bot._ensure_config(self.d)
+        self.assertTrue(os.path.exists(path))
+        self.assertIn("wrote the example limits", out.getvalue())
+        with open(path) as fh:
+            self.assertIs(json.load(fh)["paper"], True)
+        with redirect_stdout(io.StringIO()) as out:
+            bot._ensure_config(self.d)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_the_menu_runs_a_choice_and_quits(self):
+        answers = iter(["3", "", "9", "", "q"])
+        out = io.StringIO()
+        a = type("A", (), {"dir": self.d, "once": False, "no_prompt": True, "pause": False})()
+        with redirect_stdout(out):
+            code = bot.cmd_menu(a, input_fn=lambda prompt: next(answers), out=out)
+        self.assertEqual(code, 0)
+        text = out.getvalue()
+        self.assertIn("Day Trader Bot %s" % bot.VERSION, text)
+        self.assertIn("> DayTraderBot replay --fixtures --fresh --mode auto", text)
+        self.assertIn("FILLED buy 8 at $364.18", text)
+        self.assertIn("> DayTraderBot status --events 15", text)
+        self.assertIn("open   TSLA: 8 x $364.18", text)
+        self.assertTrue(os.path.isdir(os.path.join(self.d, "trader", "replays", "2026-10-19")))
+
+    def test_the_menu_handles_a_bad_choice_and_an_eof(self):
+        answers = iter(["x", ""])
+        out = io.StringIO()
+        a = type("A", (), {"dir": self.d, "once": False, "no_prompt": True, "pause": False})()
+        code = bot.cmd_menu(a, input_fn=lambda prompt: next(answers), out=out)
+        self.assertEqual(code, 0)
+        self.assertIn("Pick a number", out.getvalue())
+        code = bot.cmd_menu(a, input_fn=lambda prompt: (_ for _ in ()).throw(EOFError()), out=io.StringIO())
+        self.assertEqual(code, 0)
+
+    def test_the_packaging_files_cover_the_pack(self):
+        inst = os.path.join(ROOT, "installer")
+        with open(os.path.join(inst, "DayTraderBot.spec"), encoding="utf-8") as fh:
+            spec = fh.read()
+        for skill in ("trader-scanner", "trader-news", "trader-entry", "trader-exit", "trader-timemachine",
+                      "trader-risk", "trader-budget", "trader-broker", "trader-alerts", "trader-analyst",
+                      "trader-pelosi", "trader-bot"):
+            self.assertIn('"%s"' % skill, spec, skill)
+        for fixture in ("TSLA-2026-10-19-5m.json", "TSLA-60d5m.json.gz", "wall5m-2026-10-19.json.gz", "trader-news"):
+            self.assertIn(fixture, spec, fixture)
+        self.assertIn('name="DayTraderBot"', spec)
+        self.assertIn("console=True", spec)
+        with open(os.path.join(inst, "DayTraderBot.iss"), encoding="utf-8") as fh:
+            iss = fh.read()
+        self.assertIn('#define MyAppVersion "%s"' % bot.VERSION, iss)
+        self.assertIn("DayTraderBot.exe", iss)
+        self.assertIn("--pause replay --fixtures --fresh --mode auto", iss)
+        self.assertIn("PrivilegesRequired=lowest", iss)
+        with open(os.path.join(inst, "build.ps1"), encoding="utf-8") as fh:
+            ps1 = fh.read()
+        self.assertIn("installer\\DayTraderBot.spec", ps1)
+        self.assertIn("DayTraderBot.iss", ps1)
+        self.assertIn("replay --fixtures --fresh --mode auto", ps1)
+        self.assertTrue(os.path.exists(os.path.join(ROOT, ".github", "workflows", "windows-installer.yml")))
 
 
 class Config(unittest.TestCase):

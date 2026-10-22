@@ -109,10 +109,19 @@ Fills go through `ticket.py result` and `ticket.py fill`, so the pack's own
 log, portfolio and daily-loss count stay right, and `/trader-risk` sees the
 bot's trades like anyone else's.
 
+## The Windows app
+
+`installer/` builds the bot into `DayTraderBot-Setup-<version>.exe`
+(PyInstaller plus Inno Setup; `installer/build.ps1` does both). The
+installed `DayTraderBot.exe` takes the same commands as `bot.py`, opens a
+menu when double-clicked, runs the pack's tool scripts itself (no Python on
+the machine), and keeps its data in `%USERPROFILE%\DayTraderBot\trader\`.
+`DAYTRADERBOT_HOME` moves that folder. The README has the details.
+
 ## Replays
 
 `replay` runs a whole session on a simulated clock, offline, on the sim
-broker, in its own folder (`trader/replays/<date>/`). It takes a saved
+broker, in its own folder (`trader/replays/<date>/`, or `--into FOLDER`). It takes a saved
 Yahoo chart (`--bars TSLA.json`, or a folder of `SYMBOL.json`), the 60-day
 history for the Time Machine (`--history`), the scanner's recorded charts
 (`--wall`) and saved headlines (`--news`). `--fixtures` wires in the test
