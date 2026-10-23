@@ -32,6 +32,13 @@ def run(argv):
     return code, out.getvalue(), err.getvalue()
 
 
+def last_json(text):
+    """The last top-level JSON object in a command's output (a ticket printout can hold another)."""
+    start = text.rfind("\n{")
+    blob = text[start + 1:] if start >= 0 else text[text.find("{"):]
+    return json.loads(blob)
+
+
 def ts(day, hhmm):
     """New York wall clock -> unix seconds, through the tool's own DST rule."""
     utc = bot.hhmm_to_utc(day, hhmm)
@@ -534,6 +541,9 @@ class Window(unittest.TestCase):
             self.assertEqual(app.symbols_var.get(), "TSLA")
             self.assertEqual(app.mode_var.get(), "dry-run")
             self.assertIn("no config yet", app.account_var.get())
+            self.assertEqual(app.book.tab(app.book.tabs()[1], "text"), "Trade")
+            self.assertEqual(str(app.btn_flatten.cget("text")), "FLATTEN ALL")
+            self.assertEqual(str(app.btn_connect.cget("text")), "Connect")
             app.mode_var.set("auto")
             app._explain_mode()
             self.assertIn("Paper accounts only", app.mode_help.get())
@@ -1068,7 +1078,7 @@ class Updates(unittest.TestCase):
         with open(os.path.join(ROOT, "CHANGELOG.md")) as fh:
             self.assertIn("## %s" % bot.VERSION, fh.read())
         notes = updater.notes_from_changelog(os.path.join(ROOT, "CHANGELOG.md"), bot.VERSION)
-        self.assertIn("One-click updates", notes)
+        self.assertIn("FLATTEN ALL", notes)
         self.assertNotIn("## 2.2.0", notes)
         doc = updater.write_manifest(self.exe, "9.9.0", notes=notes)
         path = os.path.join(self.d, "latest.json")
@@ -1225,6 +1235,126 @@ class Updates(unittest.TestCase):
         out = sp.run([pwsh, "-NoProfile", "-Command", cmd], capture_output=True, text=True, env=env, timeout=120)
         self.assertEqual(out.returncode, 1)
         self.assertIn("SHA-256 does not match", out.stdout)
+
+
+class Desk(unittest.TestCase):
+    """The trading desk: manual orders, the kill switch, settings, the live switch, saved keys."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="bot-desk-")
+        os.makedirs(os.path.join(self.d, "trader"))
+        shutil.copy(CFG, os.path.join(self.d, "trader", "config.json"))
+        self._env = {k: os.environ.pop(k) for k in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY", "APCA_API_KEY_ID",
+                                                    "APCA_API_SECRET_KEY", "MT5_PASSWORD") if k in os.environ}
+
+    def tearDown(self):
+        os.environ.update(self._env)
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_settings_round_trip_and_the_locks(self):
+        code, out, err = run(["settings", "--dir", self.d, "--set", "max_daily_loss_usd=200",
+                              "--set", "bot.symbols=tsla,nvda", "--set", "bot.execution.max_open_positions=2"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("200", out)
+        cfg = json.load(open(os.path.join(self.d, "trader", "config.json")))
+        bcfg = json.load(open(os.path.join(self.d, "trader", "bot.json")))
+        self.assertEqual(cfg["max_daily_loss_usd"], 200)
+        self.assertEqual(bcfg["symbols"], ["TSLA", "NVDA"])
+        self.assertEqual(bcfg["execution"]["max_open_positions"], 2)
+        code, out, err = run(["settings", "--dir", self.d, "--set", "paper=false"])
+        self.assertEqual(code, 1)
+        self.assertIn("bot.py live", err)
+        code, out, err = run(["settings", "--dir", self.d, "--set", "max_loss_per_trade_usd=500"])
+        self.assertEqual(code, 1)
+        self.assertIn("max_daily_loss_usd", err)
+
+    def test_live_demands_the_phrase_and_auto_stays_off(self):
+        code, out, err = run(["live", "--dir", self.d, "--on"])
+        self.assertEqual(code, 1)
+        self.assertIn(bot.LIVE_PHRASE, err)
+        self.assertTrue(json.load(open(os.path.join(self.d, "trader", "config.json")))["paper"])
+        code, out, err = run(["live", "--dir", self.d, "--on", "--confirm", "trade real money", "--json"])
+        self.assertEqual(code, 0, err)
+        doc = last_json(out)
+        self.assertFalse(doc["paper"])
+        self.assertFalse(doc["allow_auto_on_live"])
+        code, out, err = run(["live", "--dir", self.d, "--auto", "on", "--confirm", bot.LIVE_PHRASE, "--json"])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(last_json(out)["allow_auto_on_live"])
+        bcfg = json.load(open(os.path.join(self.d, "trader", "bot.json")))
+        self.assertTrue(bcfg["execution"]["allow_auto_on_live"])
+        self.assertTrue(bcfg["mt5"]["allow_auto_on_real"])
+        code, out, err = run(["live", "--dir", self.d, "--off", "--auto", "off"])
+        self.assertEqual(code, 0, err)
+        cfg = json.load(open(os.path.join(self.d, "trader", "config.json")))
+        bcfg = json.load(open(os.path.join(self.d, "trader", "bot.json")))
+        self.assertTrue(cfg["paper"])
+        self.assertFalse(bcfg["execution"]["allow_auto_on_live"])
+
+    def test_a_manual_order_fills_on_the_sim_and_flatten_halts_the_day(self):
+        code, out, err = run(["order", "--dir", self.d, "--symbol", "TSLA", "--stop", "360", "--target", "372",
+                              "--qty", "5", "--bars", BARS, "--now", "2026-10-19 10:20", "--yes", "--quiet", "--json"])
+        self.assertEqual(code, 0, err)
+        doc = last_json(out)
+        self.assertEqual(doc["status"], "open")
+        self.assertEqual(doc["position"]["qty"], 5)
+        code, out, err = run(["positions", "--dir", self.d, "--bars", BARS, "--now", "2026-10-19 10:25", "--json"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(last_json(out)["positions"][0]["symbol"], "TSLA")
+        code, out, err = run(["account", "--dir", self.d, "--bars", BARS, "--now", "2026-10-19 10:25", "--json",
+                              "--quiet"])
+        acct = last_json(out)
+        self.assertEqual(acct["account"]["kind"], "paper (built-in sim)")
+        self.assertGreater(acct["account"]["equity"], 0)
+        code, out, err = run(["flatten", "--dir", self.d, "--bars", BARS, "--now", "2026-10-19 10:40", "--yes",
+                              "--quiet", "--json"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("TSLA", last_json(out)["closed"])
+        st = json.load(open(os.path.join(self.d, "trader", "state", "bot.json")))
+        self.assertIn("flattened by you", st["halted"])
+        self.assertEqual(st["positions"]["TSLA"]["status"], "closed")
+        code, out, err = run(["resume", "--dir", self.d])
+        self.assertEqual(code, 0, err)
+        self.assertIsNone(json.load(open(os.path.join(self.d, "trader", "state", "bot.json")))["halted"])
+
+    def test_close_one_and_a_stop_above_the_entry_is_refused(self):
+        code, out, err = run(["order", "--dir", self.d, "--symbol", "TSLA", "--entry", "365", "--stop", "360",
+                              "--qty", "4", "--bars", BARS, "--now", "2026-10-19 10:20", "--dry-run", "--quiet",
+                              "--json"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(last_json(out)["status"], "dry-run")
+        code, out, err = run(["order", "--dir", self.d, "--symbol", "TSLA", "--entry", "365", "--stop", "370",
+                              "--now", "2026-10-19 10:20", "--yes", "--quiet"])
+        self.assertEqual(code, 1)
+        self.assertIn("under the entry", err)
+        code, out, err = run(["order", "--dir", self.d, "--symbol", "TSLA", "--stop", "360", "--target", "372",
+                              "--qty", "4", "--bars", BARS, "--now", "2026-10-19 10:20", "--yes", "--quiet"])
+        self.assertEqual(code, 0, err)
+        code, out, err = run(["close", "--dir", self.d, "--symbol", "TSLA", "--bars", BARS,
+                              "--now", "2026-10-19 10:30", "--yes", "--quiet", "--json"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(last_json(out)["closed"], "TSLA")
+
+    def test_saved_credentials_round_trip_and_the_environment_wins(self):
+        import vault
+        v = vault.Vault(self.d)
+        v.set("alpaca.key", "from-file")
+        self.assertEqual(v.get("alpaca.key"), "from-file")
+        self.assertEqual(v.source("alpaca.key"), "saved")
+        self.assertNotIn("from-file", open(v.path).read())  # stored encoded, not as the raw secret
+        os.environ["ALPACA_API_KEY"] = "from-env"
+        try:
+            self.assertEqual(v.get("alpaca.key"), "from-env")
+            self.assertEqual(v.source("alpaca.key"), "environment")
+        finally:
+            os.environ.pop("ALPACA_API_KEY", None)
+        code, out, err = run(["creds", "--dir", self.d, "--json"])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("from-file", out)
+        self.assertEqual(last_json(out)["credentials"]["alpaca.key"], "saved")
+        code, out, err = run(["creds", "--dir", self.d, "--clear", "alpaca.key"])
+        self.assertEqual(code, 0, err)
+        self.assertIsNone(v.get("alpaca.key"))
 
 
 if __name__ == "__main__":

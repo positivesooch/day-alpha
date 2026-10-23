@@ -38,7 +38,8 @@
     "mode": "dry-run",
     "broker": "sim",
     "max_open_positions": 1,
-    "fill_wait_seconds": 60
+    "fill_wait_seconds": 60,
+    "allow_auto_on_live": false
   },
   "mt5": {
     "terminal_path": null,

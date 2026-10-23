@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Day Trader Bot, the window.
 
-A Tkinter front for trader-bot/bot.py. It never trades by itself: every
-button starts the bot as a subprocess (the console exe when installed,
-python3 bot.py otherwise) with the same arguments you would type, streams
-its output into the log pane, and sends your typed replies to it in confirm
-mode. Stop ends the subprocess; open positions stay at the broker with their
-bracket orders.
+A Tkinter front for trader-bot/bot.py. The Bot tab starts the loop as a
+subprocess (the console exe when installed, python3 bot.py otherwise), streams
+its output into the log, and sends typed replies in confirm mode. The Trade,
+Broker and Settings tabs talk to the same program: connect and read the
+account, place a bracket order, close one position, flatten everything, save
+broker keys, and switch between the paper account and a live one. A live
+switch and auto mode on a live account both demand the phrase TRADE REAL MONEY.
 
     python3 trader-bot/gui.py            # or: python3 trader-bot/bot.py gui
     DayTraderBot.exe                     # the installed app
@@ -25,7 +26,7 @@ import threading
 
 try:
     import tkinter as tk
-    from tkinter import messagebox, scrolledtext, ttk
+    from tkinter import messagebox, scrolledtext, simpledialog, ttk
 except ImportError:  # a server without Tk; the console menu still works
     tk = None
 
@@ -91,6 +92,15 @@ def looks_like_prompt(tail):
     if any(t.endswith(p.rstrip()) or t.endswith(p) for p in PROMPTS):
         return True
     return any(t.lstrip().startswith(p) for p in PROMPT_STARTS)
+
+
+def _money(value):
+    if value is None or value == "":
+        return "-"
+    try:
+        return "$%s" % format(float(value), ",.2f")
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def describe(argv):
@@ -176,13 +186,18 @@ class App(object):
         self.runner = None
         self.tail = ""
         root.title("Day Trader Bot %s" % VERSION)
-        root.minsize(820, 560)
+        root.minsize(980, 700)
         root.protocol("WM_DELETE_WINDOW", self.close)
+        self.desk_busy = False
+        self.account_doc = None
         self._build()
         self._refresh_header()
         self.append("Day Trader Bot %s. Education and tooling, not financial advice. Most people who day trade "
-                    "lose money.\nData folder: %s\n\nStart with \"Replay the reel day\": the whole method on a "
-                    "recorded session, nothing placed.\n\n" % (VERSION, self.home))
+                    "lose money.\nData folder: %s\n\nBot: replay a recorded day, or run today. Trade: connect, "
+                    "see the account, place one bracket order, close a position. FLATTEN ALL closes everything "
+                    "and stops new entries for the day. Broker: Alpaca keys or a MetaTrader 5 login. Settings: "
+                    "your limits, and the switch from paper to a live account (that switch asks you to type "
+                    "%s).\n\n" % (VERSION, self.home, bot.LIVE_PHRASE))
         root.after(100, self._drain)
         self.update_info = None
         self.update_busy = False
@@ -204,8 +219,34 @@ class App(object):
         self.btn_update = ttk.Button(head, text="Check for updates", command=self.check_updates)
         self.btn_update.pack(side="right", padx=(0, 12))
 
-        form = ttk.LabelFrame(r, text="What to do")
-        form.pack(fill="x", **pad)
+        acct = ttk.Frame(r)
+        acct.pack(fill="x", **pad)
+        self.btn_connect = ttk.Button(acct, text="Connect", command=self.connect)
+        self.btn_connect.pack(side="left")
+        self.conn_var = tk.StringVar(value="not connected")
+        ttk.Label(acct, textvariable=self.conn_var).pack(side="left", padx=8)
+        self.balance_var = tk.StringVar(value="Balance -")
+        self.equity_var = tk.StringVar(value="Equity -")
+        self.day_var = tk.StringVar(value="Today -")
+        ttk.Label(acct, textvariable=self.balance_var).pack(side="left", padx=8)
+        ttk.Label(acct, textvariable=self.equity_var).pack(side="left", padx=8)
+        ttk.Label(acct, textvariable=self.day_var).pack(side="left", padx=8)
+        self.btn_flatten = ttk.Button(acct, text="FLATTEN ALL", command=self.flatten_all)
+        self.btn_flatten.pack(side="right")
+
+        self.book = ttk.Notebook(r)
+        self.book.pack(fill="both", expand=True, padx=8, pady=4)
+        bot_tab = ttk.Frame(self.book)
+        trade_tab = ttk.Frame(self.book)
+        broker_tab = ttk.Frame(self.book)
+        settings_tab = ttk.Frame(self.book)
+        self.book.add(bot_tab, text="Bot")
+        self.book.add(trade_tab, text="Trade")
+        self.book.add(broker_tab, text="Broker")
+        self.book.add(settings_tab, text="Settings")
+
+        form = ttk.LabelFrame(bot_tab, text="What to do")
+        form.pack(fill="x", padx=8, pady=6)
         ttk.Label(form, text="Symbols").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         self.symbols_var = tk.StringVar(value=self._symbols_from_config())
         ttk.Entry(form, textvariable=self.symbols_var, width=36).grid(row=0, column=1, sticky="we", padx=6)
@@ -228,11 +269,11 @@ class App(object):
         form.columnconfigure(1, weight=1)
         self._explain_mode()
 
-        bar = ttk.Frame(r)
-        bar.pack(fill="x", **pad)
+        bar = ttk.Frame(bot_tab)
+        bar.pack(fill="x", padx=8, pady=4)
         self.btn_reel = ttk.Button(bar, text="Replay the reel day", command=lambda: self.launch("reel"))
         self.btn_reel.pack(side="left", padx=(0, 6))
-        self.btn_run = ttk.Button(bar, text="Run today, live", command=lambda: self.launch("run"))
+        self.btn_run = ttk.Button(bar, text="Run today", command=lambda: self.launch("run"))
         self.btn_run.pack(side="left", padx=(0, 6))
         self.btn_status = ttk.Button(bar, text="Status", command=lambda: self.launch("status"))
         self.btn_status.pack(side="left", padx=(0, 6))
@@ -240,10 +281,13 @@ class App(object):
         self.btn_stop.pack(side="left", padx=(0, 6))
         ttk.Button(bar, text="Settings folder", command=self.open_settings).pack(side="right")
         ttk.Button(bar, text="Clear log", command=self.clear).pack(side="right", padx=(0, 6))
+        self._build_trade(trade_tab)
+        self._build_broker(broker_tab)
+        self._build_settings(settings_tab)
 
         self.log = scrolledtext.ScrolledText(r, wrap="word", font=("Consolas" if sys.platform == "win32" else
                                                                    "TkFixedFont", 10), state="disabled",
-                                             height=20)
+                                             height=12)
         self.log.pack(fill="both", expand=True, padx=8, pady=4)
         self.log.tag_configure("prompt", foreground="#0a58ca", font=("TkDefaultFont", 10, "bold"))
         self.log.tag_configure("bad", foreground="#b00020")
@@ -262,6 +306,114 @@ class App(object):
 
         self.status_var = tk.StringVar(value="idle")
         ttk.Label(r, textvariable=self.status_var, anchor="w", relief="sunken").pack(fill="x", side="bottom")
+
+    def _build_trade(self, tab):
+        form = ttk.LabelFrame(tab, text="One bracket order (long only). Your limits still size it and can refuse it.")
+        form.pack(fill="x", padx=8, pady=6)
+        self.trade_symbol = tk.StringVar(value=self.symbols_var.get().split(",")[0])
+        self.trade_qty = tk.StringVar()
+        self.trade_entry = tk.StringVar()
+        self.trade_stop = tk.StringVar()
+        self.trade_target = tk.StringVar()
+        self.trade_dry = tk.BooleanVar(value=False)
+        fields = (("Symbol", self.trade_symbol), ("Shares", self.trade_qty), ("Entry", self.trade_entry),
+                  ("Stop", self.trade_stop), ("Target", self.trade_target))
+        for col, (label, var) in enumerate(fields):
+            ttk.Label(form, text=label).grid(row=0, column=col, sticky="w", padx=6, pady=(4, 0))
+            ttk.Entry(form, textvariable=var, width=12).grid(row=1, column=col, sticky="we", padx=6, pady=(0, 6))
+        form.columnconfigure(0, weight=1)
+        row = ttk.Frame(tab)
+        row.pack(fill="x", padx=8)
+        ttk.Button(row, text="Place order", command=self.place_order).pack(side="left")
+        ttk.Checkbutton(row, text="dry-run (build the ticket, place nothing)", variable=self.trade_dry).pack(
+            side="left", padx=12)
+        ttk.Label(row, text="Entry blank: use the broker's price. Target blank: 2R.").pack(side="left")
+
+        cols = ("symbol", "side", "qty", "entry", "mark", "pnl", "stop", "target")
+        heads = ("Symbol", "Side", "Qty", "Entry", "Mark", "P&L", "Stop", "Target")
+        self.tree = ttk.Treeview(tab, columns=cols, show="headings", height=6)
+        for c, h in zip(cols, heads):
+            self.tree.heading(c, text=h)
+            self.tree.column(c, width=90, anchor="e" if c != "symbol" else "w")
+        self.tree.pack(fill="both", expand=True, padx=8, pady=6)
+        bar = ttk.Frame(tab)
+        bar.pack(fill="x", padx=8, pady=(0, 6))
+        ttk.Button(bar, text="Close selected", command=self.close_selected).pack(side="left")
+        ttk.Button(bar, text="Refresh positions", command=self.connect).pack(side="left", padx=6)
+
+    def _build_broker(self, tab):
+        form = ttk.LabelFrame(tab, text="Alpaca. Paper keys until you switch to live on Settings. Values are saved "
+                                         "encrypted for your Windows user and are not shown again.")
+        form.pack(fill="x", padx=8, pady=6)
+        self.key_var = tk.StringVar()
+        self.secret_var = tk.StringVar()
+        ttk.Label(form, text="API key").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(form, textvariable=self.key_var, show="*", width=42).grid(row=0, column=1, sticky="we", padx=6)
+        ttk.Label(form, text="Secret").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(form, textvariable=self.secret_var, show="*", width=42).grid(row=1, column=1, sticky="we", padx=6)
+        form.columnconfigure(1, weight=1)
+
+        mt5 = ttk.LabelFrame(tab, text="MetaTrader 5. Leave the login empty to use the account already logged in "
+                                        "to the open terminal.")
+        mt5.pack(fill="x", padx=8, pady=6)
+        self.mt5_login = tk.StringVar()
+        self.mt5_server = tk.StringVar()
+        self.mt5_pw = tk.StringVar()
+        self.mt5_path = tk.StringVar()
+        self.mt5_suffix = tk.StringVar()
+        for row, (label, var, secret) in enumerate((
+                ("Login", self.mt5_login, False), ("Server", self.mt5_server, False),
+                ("Password", self.mt5_pw, True), ("Terminal path", self.mt5_path, False),
+                ("Symbol suffix", self.mt5_suffix, False))):
+            ttk.Label(mt5, text=label).grid(row=row, column=0, sticky="w", padx=6, pady=3)
+            ttk.Entry(mt5, textvariable=var, show="*" if secret else "", width=42).grid(
+                row=row, column=1, sticky="we", padx=6)
+        mt5.columnconfigure(1, weight=1)
+        bar = ttk.Frame(tab)
+        bar.pack(fill="x", padx=8, pady=4)
+        ttk.Button(bar, text="Save broker", command=self.save_broker).pack(side="left")
+        ttk.Button(bar, text="Forget saved keys", command=self.forget_keys).pack(side="left", padx=6)
+        self.cred_var = tk.StringVar(value="Keys: not loaded")
+        ttk.Label(bar, textvariable=self.cred_var).pack(side="left", padx=12)
+
+    def _build_settings(self, tab):
+        form = ttk.LabelFrame(tab, text="Limits (trader\\config.json and trader\\bot.json)")
+        form.pack(fill="x", padx=8, pady=6)
+        self.setting_vars = {}
+        fields = (
+            ("budget", "Budget ($)"), ("max_loss_per_trade_usd", "Max loss per trade ($)"),
+            ("max_daily_loss_usd", "Max daily loss ($)"), ("max_trades_per_day", "Max trades a day"),
+            ("max_position_pct", "Max position (%)"), ("flat_by", "Flat by (New York)"),
+            ("no_entries_before", "No entries before"), ("no_entries_after", "No entries after"),
+            ("bot.execution.max_open_positions", "Max open positions"),
+            ("bot.plan.stop", "Stop rule"), ("bot.plan.target", "Target rule"),
+            ("bot.mt5.prop.initial_balance", "Prop account size ($)"),
+            ("bot.mt5.prop.max_daily_loss_pct", "Prop daily loss (%)"),
+            ("bot.mt5.prop.max_total_drawdown_pct", "Prop max drawdown (%)"),
+            ("bot.mt5.prop.buffer_pct", "Prop buffer (%)"),
+        )
+        for i, (key, label) in enumerate(fields):
+            var = tk.StringVar()
+            self.setting_vars[key] = var
+            ttk.Label(form, text=label).grid(row=i // 2, column=(i % 2) * 2, sticky="w", padx=6, pady=3)
+            ttk.Entry(form, textvariable=var, width=18).grid(row=i // 2, column=(i % 2) * 2 + 1, sticky="w", padx=6)
+        bar = ttk.Frame(tab)
+        bar.pack(fill="x", padx=8, pady=4)
+        ttk.Button(bar, text="Load", command=self.load_settings).pack(side="left")
+        ttk.Button(bar, text="Save limits", command=self.save_settings).pack(side="left", padx=6)
+
+        live = ttk.LabelFrame(tab, text="Real money. Paper is the default. Switching to live sends orders to the "
+                                         "broker's live account.")
+        live.pack(fill="x", padx=8, pady=6)
+        self.live_var = tk.StringVar(value="Account mode: paper, until you load or connect")
+        ttk.Label(live, textvariable=self.live_var).pack(anchor="w", padx=6, pady=4)
+        row = ttk.Frame(live)
+        row.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Button(row, text="Switch to LIVE", command=self.switch_live).pack(side="left")
+        ttk.Button(row, text="Back to paper", command=self.switch_paper).pack(side="left", padx=6)
+        self.auto_live_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row, text="Let auto mode trade the live account", variable=self.auto_live_var,
+                        command=self.arm_auto).pack(side="left", padx=12)
 
     def _symbols_from_config(self):
         cfg = bot.read_json(os.path.join(self.home, "trader", "bot.json"), required=False) or {}
@@ -290,7 +442,9 @@ class App(object):
         }[self.mode_var.get()]
         if self.broker_var.get() == "mt5":
             text += ("  MT5: the open terminal is the broker and the candle feed; the prop firm's daily loss and "
-                     "drawdown limits (trader\\bot.json, \"mt5\") are enforced on top; password in MT5_PASSWORD.")
+                     "drawdown limits are enforced on top. Save the login on the Broker tab, or set MT5_PASSWORD.")
+        elif self.broker_var.get() == "alpaca":
+            text += "  Alpaca: paper keys until Settings switches this to the live account. Save them on the Broker tab."
         self.mode_help.set(text)
 
     # ---- log
@@ -309,10 +463,256 @@ class App(object):
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
 
+    def _paper(self):
+        cfg = bot.read_json(os.path.join(self.home, "trader", "config.json"), required=False) or {}
+        if not cfg:
+            return True
+        return bool(cfg.get("paper", True))
+
+    def _json_from(self, text):
+        start = text.find("{")
+        if start < 0:
+            return None
+        try:
+            return json.JSONDecoder().raw_decode(text[start:])[0]
+        except ValueError:
+            return None
+
+    def _ask_phrase(self):
+        got = simpledialog.askstring(
+            "Real money",
+            "This uses a LIVE brokerage account. Real money, real losses. Most people who day trade lose money.\n\n"
+            "Type %s to continue." % bot.LIVE_PHRASE, parent=self.root)
+        if got is None:
+            return False
+        if got.strip().upper() != bot.LIVE_PHRASE:
+            messagebox.showerror("Real money", "The phrase did not match. Nothing was changed.")
+            return False
+        return True
+
+    def desk(self, argv, stdin_text=None, done=None):
+        """One short bot command (account, order, close, settings). The long run stays on Runner."""
+        if self.runner and self.runner.alive() or self.desk_busy:
+            messagebox.showinfo("Busy", "The bot is already running. Stop it first.")
+            return
+        self.desk_busy = True
+        shown = describe(argv)
+        self.status_var.set("running: %s" % shown)
+        self.append("\n> %s\n\n" % shown, "prompt")
+
+        def work():
+            env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+            kw = {}
+            if sys.platform == "win32":
+                kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            try:
+                data = None if stdin_text is None else (stdin_text + "\n").encode("utf-8")
+                p = subprocess.run(cli_command() + argv, input=data, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, env=env, timeout=180, **kw)
+                text, code = p.stdout.decode("utf-8", "replace"), p.returncode
+            except Exception as e:
+                text, code = "trader-bot: %s" % e, 1
+
+            def finish():
+                self.desk_busy = False
+                self._show(text if text.endswith("\n") else text + "\n")
+                self.status_var.set("idle" if code == 0 else "idle (exit code %s)" % code)
+                if done:
+                    done(code, text)
+            self.root.after(0, finish)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _base(self, argv):
+        return argv + ["--dir", self.home, "--broker", self.broker_var.get(), "--quiet"]
+
+    def connect(self):
+        self.desk(self._base(["account", "--json"]), done=self._connected)
+
+    def _connected(self, code, text):
+        doc = self._json_from(text)
+        if not doc or "account" not in doc:
+            self.conn_var.set("not connected")
+            return
+        self.account_doc = doc
+        a = doc["account"]
+        kind = "PAPER" if doc.get("paper", True) else "LIVE"
+        where = a.get("server") or a.get("id") or doc["broker"]
+        self.conn_var.set("%s  %s  %s" % (doc["broker"], kind, where))
+        self.balance_var.set("Balance %s" % _money(a.get("balance")))
+        self.equity_var.set("Equity %s" % _money(a.get("equity")))
+        day = a.get("day_pnl")
+        self.day_var.set("Today -" if day is None else "Today %s%s" % ("+" if day >= 0 else "-", _money(abs(day))))
+        creds = doc.get("credentials") or {}
+        self.cred_var.set("Keys: " + ", ".join("%s %s" % (k.split(".")[-1], v or "missing") for k, v in sorted(creds.items())))
+        self.live_var.set("Account mode: %s. Auto mode on a live account is armed on the bot only after you tick it "
+                          "and type the phrase." % ("PAPER" if doc.get("paper", True) else "LIVE, real money"))
+        self._refresh_header()
+        if not doc.get("paper", True):
+            self.account_var.set("LIVE account, real money, %s equity %s" % (doc["broker"], _money(a.get("equity"))))
+            self.account_lbl.configure(foreground="#b00020")
+        self.tree.delete(*self.tree.get_children())
+        for p in doc.get("positions") or []:
+            pnl = p.get("pnl") or 0
+            self.tree.insert("", "end", values=(
+                p.get("symbol"), p.get("side"), p.get("qty"), _money(p.get("entry")), _money(p.get("mark")),
+                "%s%s" % ("+" if pnl >= 0 else "-", _money(abs(pnl))),
+                _money(p.get("stop")) if p.get("stop") else "-",
+                _money(p.get("target")) if p.get("target") else "-"))
+
+    def flatten_all(self):
+        account = "PAPER" if self._paper() else "LIVE, real money"
+        if not messagebox.askyesno("Flatten all",
+                                   "Close every open position at market on the %s %s account, cancel every open "
+                                   "order, and take no more entries today?" % (self.broker_var.get(), account)):
+            return
+        self.desk(self._base(["flatten", "--yes", "--json"]), done=lambda c, t: self.connect())
+
+    def place_order(self):
+        sym = self.trade_symbol.get().strip().upper()
+        if not sym:
+            messagebox.showerror("Order", "A symbol is required.")
+            return
+        try:
+            stop = float(self.trade_stop.get())
+        except ValueError:
+            messagebox.showerror("Order", "Stop must be a price under the entry.")
+            return
+        argv = ["order", "--symbol", sym, "--stop", repr(stop), "--json"]
+        entry = self.trade_entry.get().strip()
+        target = self.trade_target.get().strip()
+        qty = self.trade_qty.get().strip()
+        if entry:
+            argv += ["--entry", entry]
+        if target:
+            argv += ["--target", target]
+        if qty:
+            argv += ["--qty", qty]
+        if self.trade_dry.get():
+            argv.append("--dry-run")
+        else:
+            if not self._paper():
+                if not messagebox.askyesno("Live order",
+                                           "Place this bracket order on the LIVE account with real money?"):
+                    return
+            argv.append("--yes")
+        self.desk(self._base(argv), done=lambda c, t: self.connect())
+
+    def close_selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("Close", "Select a position first.")
+            return
+        sym = str(self.tree.item(sel[0], "values")[0])
+        account = "PAPER" if self._paper() else "LIVE, real money"
+        if not messagebox.askyesno("Close %s" % sym, "Close %s at market on the %s account?" % (sym, account)):
+            return
+        self.desk(self._base(["close", "--symbol", sym, "--yes", "--json"]), done=lambda c, t: self.connect())
+
+    def save_broker(self):
+        pairs = []
+        for key, var in (("bot.mt5.login", self.mt5_login), ("bot.mt5.server", self.mt5_server),
+                         ("bot.mt5.terminal_path", self.mt5_path), ("bot.mt5.symbol_suffix", self.mt5_suffix)):
+            val = var.get().strip()
+            if val:
+                pairs.append("%s=%s" % (key, val))
+        secrets = [(name, var.get()) for name, var in (
+            ("alpaca.key", self.key_var), ("alpaca.secret", self.secret_var), ("mt5.password", self.mt5_pw))
+            if var.get().strip()]
+        if not pairs and not secrets:
+            messagebox.showinfo("Broker", "Nothing to save. Leave a box blank to keep what is already saved.")
+            return
+
+        def secrets_from(i):
+            if i >= len(secrets):
+                self.key_var.set("")
+                self.secret_var.set("")
+                self.mt5_pw.set("")
+                self.append("Saved. The key boxes are cleared so the values are not left on screen.\n", "good")
+                self.connect()
+                return
+            name, value = secrets[i]
+            self.desk(["creds", "--set", name, "--dir", self.home, "--json"], stdin_text=value,
+                      done=lambda code, text, i=i: secrets_from(i + 1) if code == 0 else None)
+
+        if pairs:
+            self.desk(["settings", "--dir", self.home] + sum([["--set", p] for p in pairs], []),
+                      done=lambda code, text: secrets_from(0) if code == 0 else None)
+        else:
+            secrets_from(0)
+
+    def forget_keys(self):
+        if not messagebox.askyesno("Forget keys", "Delete the saved Alpaca keys and the MetaTrader 5 password?"):
+            return
+        self.desk(["creds", "--clear", "all", "--dir", self.home], done=lambda c, t: self.connect())
+
+    def load_settings(self):
+        self.desk(["settings", "--json", "--dir", self.home], done=self._settings_loaded)
+
+    def _settings_loaded(self, code, text):
+        doc = self._json_from(text)
+        if not doc:
+            return
+        cfg, bcfg = doc.get("config") or {}, doc.get("bot") or {}
+        for key, var in self.setting_vars.items():
+            if key.startswith("bot."):
+                node = bcfg
+                for part in key[4:].split("."):
+                    node = node.get(part) if isinstance(node, dict) else None
+                var.set("" if node is None else str(node))
+            else:
+                val = cfg.get(key)
+                var.set("" if val is None else str(val))
+        mt5 = bcfg.get("mt5") or {}
+        self.mt5_login.set("" if not mt5.get("login") else str(mt5.get("login")))
+        self.mt5_server.set(mt5.get("server") or "")
+        self.mt5_path.set(mt5.get("terminal_path") or "")
+        self.mt5_suffix.set(mt5.get("symbol_suffix") or "")
+        paper = bool(cfg.get("paper", True))
+        self.live_var.set("Account mode: %s." % ("PAPER" if paper else "LIVE, real money"))
+        armed = bool((bcfg.get("execution") or {}).get("allow_auto_on_live") or mt5.get("allow_auto_on_real"))
+        self.auto_live_var.set(armed)
+        self._refresh_header()
+
+    def save_settings(self):
+        pairs = []
+        for key, var in self.setting_vars.items():
+            val = var.get().strip()
+            if val:
+                pairs.append("%s=%s" % (key, val))
+        if not pairs:
+            messagebox.showinfo("Settings", "Load first, then change a value.")
+            return
+        argv = ["settings", "--dir", self.home] + sum([["--set", p] for p in pairs], [])
+        self.desk(argv, done=lambda c, t: self.load_settings())
+
+    def switch_live(self):
+        if not messagebox.askyesno("Live account",
+                                   "Alpaca orders will go to the live API, and a MetaTrader 5 login may be a REAL "
+                                   "account. Confirm mode still asks you for every order. Continue?"):
+            return
+        if not self._ask_phrase():
+            return
+        self.desk(["live", "--on", "--confirm", bot.LIVE_PHRASE, "--json", "--dir", self.home],
+                  done=lambda c, t: self._refresh_header() or self.load_settings())
+
+    def switch_paper(self):
+        self.desk(["live", "--off", "--json", "--dir", self.home],
+                  done=lambda c, t: self._refresh_header() or self.load_settings())
+
+    def arm_auto(self):
+        on = self.auto_live_var.get()
+        if on and not self._ask_phrase():
+            self.auto_live_var.set(False)
+            return
+        argv = ["live", "--auto", "on" if on else "off", "--json", "--dir", self.home]
+        if on:
+            argv += ["--confirm", bot.LIVE_PHRASE]
+        self.desk(argv, done=lambda code, text: self.auto_live_var.set(False) if code != 0 and on else None)
+
     # ---- actions
 
     def launch(self, action):
-        if self.runner and self.runner.alive():
+        if (self.runner and self.runner.alive()) or self.desk_busy:
             messagebox.showinfo("Busy", "The bot is already running. Stop it first.")
             return
         mode, broker = self.mode_var.get(), self.broker_var.get()
@@ -321,12 +721,18 @@ class App(object):
         except ValueError as e:
             messagebox.showerror("Day Trader Bot", str(e))
             return
-        if action == "run" and mode == "auto" and broker == "alpaca":
+        if action == "run" and mode == "auto" and not self._paper():
+            if not messagebox.askyesno("Live account, hands off",
+                                       "Auto mode on a LIVE account places orders with real money and does not ask "
+                                       "again. It starts only if \"Let auto mode trade the live account\" is ticked "
+                                       "on Settings. Continue?"):
+                return
+        elif action == "run" and mode == "auto" and broker == "alpaca":
             if not messagebox.askyesno("Alpaca, hands off",
                                        "Auto mode on Alpaca places bracket orders on your PAPER account without "
                                        "asking again (keys from ALPACA_API_KEY / ALPACA_SECRET_KEY). Continue?"):
                 return
-        if action == "run" and mode == "auto" and broker == "mt5":
+        elif action == "run" and mode == "auto" and broker == "mt5":
             if not messagebox.askyesno("MetaTrader 5, hands off",
                                        "Auto mode on MetaTrader 5 sends market deals with stop-loss and take-profit "
                                        "to the account the open terminal is logged in to, without asking again. "

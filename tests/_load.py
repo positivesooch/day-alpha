@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.path.join(ROOT, "tests", "fixtures")
@@ -11,5 +12,6 @@ def load(folder, name):
     path = os.path.join(ROOT, folder, name + ".py")
     spec = importlib.util.spec_from_file_location("trader_" + name, path)
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod

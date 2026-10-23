@@ -192,9 +192,10 @@ def filling_mode(info):
 class Link(object):
     """One connection to the terminal, shared by the bars, the broker and the guard."""
 
-    def __init__(self, cfg, mt5=None):
+    def __init__(self, cfg, mt5=None, password=None):
         self.cfg = merged(cfg)
         self.mt5 = mt5 or load_mt5()
+        self.password = password
         self.offset_hours = self.cfg.get("server_utc_offset_hours")
         self.connected = False
         self._info_cache = {}
@@ -204,11 +205,11 @@ class Link(object):
         if self.cfg.get("terminal_path"):
             kw["path"] = self.cfg["terminal_path"]
         if self.cfg.get("login"):
-            pw = os.environ.get("MT5_PASSWORD")
+            pw = os.environ.get("MT5_PASSWORD") or self.password
             if not pw:
-                raise MT5Error("MT5_PASSWORD is not set. Put the account's password in that environment variable "
-                               "(never in a file here, never in a chat), or log the terminal in yourself and "
-                               "leave mt5.login empty.")
+                raise MT5Error("no MetaTrader 5 password: save it on the window's Broker tab, set the MT5_PASSWORD "
+                               "environment variable (never a file in the repo, never a chat), or log the terminal "
+                               "in yourself and leave mt5.login empty.")
             kw.update(login=int(self.cfg["login"]), password=pw)
             if self.cfg.get("server"):
                 kw["server"] = self.cfg["server"]
@@ -611,11 +612,48 @@ class MT5Broker(object):
             out["reason"] = "flat_by"
         return out
 
-    def flatten_all(self, now):
-        """Every position with the bot's magic number, closed. Returns the tickets."""
+    def positions(self):
+        """Every open position in the terminal, in the desk's shape (the bot's own are flagged)."""
+        out = []
+        for p in self.link.mt5.positions_get() or []:
+            out.append({"symbol": _get(p, "symbol"), "side": "long" if int(_get(p, "type", 0) or 0) == ORDER_TYPE_BUY
+                        else "short", "qty": float(_get(p, "volume", 0) or 0), "lots": float(_get(p, "volume", 0) or 0),
+                        "entry": float(_get(p, "price_open", 0) or 0), "mark": float(_get(p, "price_current", 0) or 0),
+                        "pnl": round(float(_get(p, "profit", 0) or 0) + float(_get(p, "swap", 0) or 0), 2),
+                        "stop": float(_get(p, "sl", 0) or 0) or None, "target": float(_get(p, "tp", 0) or 0) or None,
+                        "broker_id": str(_get(p, "ticket")),
+                        "bot": int(_get(p, "magic", 0) or 0) == int(self.cfg.get("magic") or 0)})
+        return out
+
+    def quote(self, symbol):
+        fsym = firm_symbol(self.cfg, symbol)
+        self.link.symbol_info(fsym)
+        tick = self.link.tick(fsym)
+        return float(_get(tick, "ask") or _get(tick, "bid") or 0) or None
+
+    def close(self, symbol, now):
+        """Every position on the symbol (the firm's name or the ticker), closed at market."""
+        fsym = firm_symbol(self.cfg, symbol)
+        hits = []
+        for p in self.link.mt5.positions_get() or []:
+            if _get(p, "symbol") not in (fsym, symbol):
+                continue
+            fake = {"broker_id": _get(p, "ticket"), "symbol": symbol, "mt5_symbol": _get(p, "symbol"),
+                    "entry": float(_get(p, "price_open", 0) or 0)}
+            hits.append(self.flatten(fake, now))
+        if not hits:
+            raise MT5Error("no open position on %s in the terminal" % fsym)
+        hit = hits[-1]
+        return {"symbol": symbol, "broker_id": str(hit.get("broker_id") or ""), "status": "filled",
+                "price": hit.get("price"), "pnl": sum(float(h.get("pnl") or 0) for h in hits), "at": now,
+                "count": len(hits)}
+
+    def flatten_all(self, now, everything=False):
+        """Every position with the bot's magic number, closed (every position in the
+        terminal with everything=True). Returns the tickets."""
         closed = []
         for p in self.link.mt5.positions_get() or []:
-            if int(_get(p, "magic", 0) or 0) != int(self.cfg.get("magic") or 0):
+            if not everything and int(_get(p, "magic", 0) or 0) != int(self.cfg.get("magic") or 0):
                 continue
             fake = {"broker_id": _get(p, "ticket"), "symbol": _get(p, "symbol"), "mt5_symbol": _get(p, "symbol"),
                     "entry": float(_get(p, "price_open", 0) or 0)}

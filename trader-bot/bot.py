@@ -37,7 +37,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 
 # Frozen (the Windows build made by installer/DayTraderBot.spec): the pack's
 # folders are bundled under <bundle>/pack, and the exe itself is the Python
@@ -66,6 +66,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import mt5link  # noqa: E402  (the MetaTrader 5 link; standard library until the bot connects)
 import update as updater  # noqa: E402  (one-click updates for the installed app)
+import vault  # noqa: E402  (broker credentials, encrypted for the Windows user)
 
 
 def default_home():
@@ -83,6 +84,8 @@ UA = "day-trader-skill/2.0 (trader-bot; python-urllib)"
 CHART_URL = "https://query2.finance.yahoo.com/v8/finance/chart/%s?range=1d&interval=%s&includePrePost=false"
 ALPACA_PAPER = "https://paper-api.alpaca.markets"
 ALPACA_LIVE = "https://api.alpaca.markets"
+ALPACA_DATA = "https://data.alpaca.markets"
+LIVE_PHRASE = "TRADE REAL MONEY"
 MODES = ("dry-run", "confirm", "auto")
 BROKERS = ("sim", "alpaca", "mt5")
 DONE = {"expired", "skipped", "blocked", "dry-run", "declined", "failed", "open", "closed", "no-order"}
@@ -96,7 +99,8 @@ DEFAULTS = {
     "news": {"enabled": False, "hours": 12, "block_tags": []},
     "timemachine": {"enabled": True, "replays": 10000, "seed": 19, "min_edge_pct": 0.0,
                     "min_history_triggers": 0, "required": True},
-    "execution": {"mode": "dry-run", "broker": "sim", "max_open_positions": 1, "fill_wait_seconds": 60},
+    "execution": {"mode": "dry-run", "broker": "sim", "max_open_positions": 1, "fill_wait_seconds": 60,
+                  "allow_auto_on_live": False},
     "mt5": json.loads(json.dumps(mt5link.DEFAULTS)),
     "update": dict(updater.DEFAULTS),
     "poll_seconds": 20,
@@ -511,17 +515,19 @@ class AlpacaBroker(object):
 
     name = "alpaca"
 
-    def __init__(self, paper):
+    def __init__(self, paper, key=None, secret=None):
+        self.paper = paper
         self.base = ALPACA_PAPER if paper else ALPACA_LIVE
-        self.key = os.environ.get("ALPACA_API_KEY") or os.environ.get("APCA_API_KEY_ID")
-        self.secret = os.environ.get("ALPACA_SECRET_KEY") or os.environ.get("APCA_API_SECRET_KEY")
+        self.key = key or os.environ.get("ALPACA_API_KEY") or os.environ.get("APCA_API_KEY_ID")
+        self.secret = secret or os.environ.get("ALPACA_SECRET_KEY") or os.environ.get("APCA_API_SECRET_KEY")
         if not self.key or not self.secret:
-            raise BotError("Alpaca needs ALPACA_API_KEY and ALPACA_SECRET_KEY in the environment "
-                           "(paper keys from the Alpaca dashboard). Never paste them in a chat.")
+            raise BotError("Alpaca needs an API key and secret: save them on the window's Broker tab, or set "
+                           "ALPACA_API_KEY and ALPACA_SECRET_KEY in the environment (%s keys from the Alpaca "
+                           "dashboard). Never paste them in a chat." % ("paper" if paper else "live"))
 
-    def call(self, method, path, body=None):
+    def call(self, method, path, body=None, base=None):
         data = json.dumps(body).encode("utf-8") if body is not None else None
-        req = urllib.request.Request(self.base + path, data=data, method=method, headers={
+        req = urllib.request.Request((base or self.base) + path, data=data, method=method, headers={
             "APCA-API-KEY-ID": self.key, "APCA-API-SECRET-KEY": self.secret,
             "Content-Type": "application/json", "Accept": "application/json", "User-Agent": UA})
         try:
@@ -536,6 +542,53 @@ class AlpacaBroker(object):
 
     def account(self):
         return self.call("GET", "/v2/account")
+
+    def positions(self):
+        """Every open position at the broker, in the desk's shape."""
+        out = []
+        for p in self.call("GET", "/v2/positions") or []:
+            qty = float(p.get("qty") or 0)
+            out.append({"symbol": p.get("symbol"), "side": "short" if qty < 0 or p.get("side") == "short" else "long",
+                        "qty": abs(qty), "entry": round(float(p.get("avg_entry_price") or 0), 2),
+                        "mark": round(float(p.get("current_price") or 0), 2),
+                        "pnl": round(float(p.get("unrealized_pl") or 0), 2),
+                        "value": round(float(p.get("market_value") or 0), 2), "broker_id": p.get("asset_id")})
+        return out
+
+    def orders(self):
+        out = []
+        for o in self.call("GET", "/v2/orders?status=open&nested=true&limit=100") or []:
+            for leg in [o] + (o.get("legs") or []):
+                out.append({"id": leg.get("id"), "symbol": leg.get("symbol"), "side": leg.get("side"),
+                            "qty": leg.get("qty"), "type": leg.get("type"), "status": leg.get("status"),
+                            "limit": leg.get("limit_price"), "stop": leg.get("stop_price")})
+        return out
+
+    def quote(self, symbol):
+        """The last trade from Alpaca's data API (free IEX feed)."""
+        doc = self.call("GET", "/v2/stocks/%s/trades/latest?feed=iex" % symbol, base=ALPACA_DATA)
+        trade = (doc or {}).get("trade") or {}
+        return float(trade.get("p") or 0) or None
+
+    def close(self, symbol, now):
+        """Close one position at market and cancel its bracket legs."""
+        res = self.call("DELETE", "/v2/positions/%s?cancel_orders=true" % symbol)
+        oid = res.get("id")
+        deadline = time.time() + 60
+        while oid and time.time() < deadline and res.get("status") not in ("filled", "canceled", "rejected", "expired"):
+            time.sleep(2)
+            res = self.call("GET", "/v2/orders/%s" % oid)
+        return {"symbol": symbol, "broker_id": oid, "status": res.get("status"),
+                "price": round(float(res.get("filled_avg_price") or 0), 2) or None, "at": now}
+
+    def cancel_all(self):
+        return len(self.call("DELETE", "/v2/orders") or [])
+
+    def flatten_all(self, now, everything=True):
+        """Every position closed at market, every open order cancelled. Returns the symbols."""
+        self.cancel_all()
+        res = self.call("DELETE", "/v2/positions?cancel_orders=true") or []
+        return [r.get("symbol") for r in res if r.get("symbol")]
 
     def place(self, order, now, wait_seconds=60):
         body = {"symbol": order["symbol"], "qty": str(order["qty"]), "side": order["side"],
@@ -607,12 +660,17 @@ class Bot(object):
         if self.broker_name not in BROKERS:
             raise BotError("broker must be one of %s" % ", ".join(BROKERS))
         self.paper = bool(self.cfg.get("paper", True))
-        auto_on_real = self.broker_name == "mt5" and bool(self.bot["mt5"].get("allow_auto_on_real"))
+        self.vault = vault.Vault(self.workdir)
+        auto_on_real = (self.broker_name == "mt5" and bool(self.bot["mt5"].get("allow_auto_on_real"))) or \
+            bool(ex.get("allow_auto_on_live"))
         if self.mode == "auto" and not self.paper and not auto_on_real:
             raise BotError("auto mode is for paper accounts only: trader/config.json says \"paper\": false. "
-                           "Use --mode confirm and say yes to each order yourself, or set paper back to true"
-                           + (". A REAL MetaTrader 5 account needs mt5.allow_auto_on_real true in trader/bot.json "
-                             "as well, on purpose." if self.broker_name == "mt5" else "."))
+                           "Use --mode confirm and say yes to each order yourself, or set paper back to true. "
+                           "To let the bot trade real money by itself, arm it on purpose: the window's Settings tab "
+                           "(\"let auto mode trade the live account\") or execution.allow_auto_on_live true in "
+                           "trader/bot.json"
+                           + (" (a REAL MetaTrader 5 account also takes mt5.allow_auto_on_real)." if self.broker_name == "mt5"
+                              else "."))
         if self.broker_name != "sim" and replay:
             raise BotError("a replay runs on the built-in sim broker, not %s"
                            % {"alpaca": "Alpaca", "mt5": "MetaTrader 5"}[self.broker_name])
@@ -635,7 +693,7 @@ class Bot(object):
         if self.broker_name == "sim":
             self.broker = SimBroker(self.bars)
         elif self.broker_name == "alpaca":
-            self.broker = AlpacaBroker(self.paper)
+            self.broker = AlpacaBroker(self.paper, key=self.vault.get("alpaca.key"), secret=self.vault.get("alpaca.secret"))
         self.last_scan = None
 
     def _connect_mt5(self, bars, history, mt5):
@@ -645,7 +703,7 @@ class Bot(object):
         is what prop-firm challenge and funded logins report."""
         mcfg = self.bot["mt5"]
         try:
-            link = mt5link.Link(mcfg, mt5=mt5)
+            link = mt5link.Link(mcfg, mt5=mt5, password=self.vault.get("mt5.password"))
             acct = link.connect()
         except mt5link.MT5Error as e:
             raise BotError(str(e))
@@ -699,16 +757,35 @@ class Bot(object):
 
     # ---- one tick
 
-    def tick(self, now):
+    def begin_day(self, now):
+        """The state belongs to today; a new day starts a fresh one."""
         self.now = now
         day = to_eastern(now).date()
         if self.state.get("date") != day.isoformat():
             self.fresh_state(day)
+        return day
+
+    def halt_path(self):
+        return os.path.join(self.trader, "state", "halt.json")
+
+    def check_halt_file(self):
+        """A kill switch pressed in another process (the window's FLATTEN ALL, bot.py flatten)
+        leaves trader/state/halt.json for today: this session takes no more trades."""
+        if self.state.get("halted"):
+            return
+        doc = read_json(self.halt_path(), required=False)
+        if doc and doc.get("date") == self.state.get("date"):
+            self.state["halted"] = doc.get("reason") or "halted from the desk"
+            self.log("HALTED: %s. No more entries today; open positions are watched to the close." % self.state["halted"])
+
+    def tick(self, now):
+        self.begin_day(now)
         self.state["last_tick"] = ny_text(now)
         hhmm = ny_hhmm(now)
         flat_by = self.cfg.get("flat_by") or "15:55"
         no_after = self.cfg.get("no_entries_after") or "15:30"
 
+        self.check_halt_file()
         self.prop_emergency(now)
         for pos in self.open_positions():
             self.watch_position(pos, hhmm >= flat_by or bool(self.state.get("halted")))
@@ -1172,6 +1249,13 @@ class Bot(object):
             self.note("%s: open, %d shares from %s, marked %s (stop %s, target %s, flat by %s)" % (
                 sym, pos["qty"], money(pos["entry"]), money(mark), money(pos["stop"]), money(pos["target"]), pos["flat_by"]))
             return
+        self.record_exit(pos, hit)
+
+    def record_exit(self, pos, hit):
+        """A position is closed: the state, the ticket's fill record and the log."""
+        sym = pos["symbol"]
+        if hit.get("price") is None:
+            hit["price"] = pos.get("mark") or pos["entry"]
         if hit.get("pnl") is not None:
             pnl = round(float(hit["pnl"]), 2)  # the broker's own number: commission and swap included
         else:
@@ -1182,10 +1266,27 @@ class Bot(object):
         self.tool.run("ticket", ["fill", "--symbol", sym, "--side", "sell", "--qty", pos["qty"], "--price", hit["price"]],
                       want_json=False)
         self.state["candidates"][sym]["status"] = "closed"
-        label = {"stop": "STOP filled", "target": "TARGET filled", "flat_by": "flat by %s, sold" % pos["flat_by"]}.get(
-            hit["reason"], hit["reason"])
+        label = {"stop": "STOP filled", "target": "TARGET filled",
+                 "flat_by": "flat by %s, sold" % pos.get("flat_by")}.get(hit["reason"], hit["reason"])
         self.log("%s: %s at %s: %s%s on %d shares (%s R)" % (
             sym, label, money(hit["price"]), "+" if pnl >= 0 else "-", money(abs(pnl)), pos["qty"], pos["r"]))
+
+    def quote(self, sym):
+        """About where the symbol trades now: the broker's last price, else the bars'."""
+        try:
+            if hasattr(self.broker, "quote"):
+                px = self.broker.quote(sym)
+                if px:
+                    return float(px)
+        except BotError as e:
+            self.log("%s: the broker has no quote (%s)" % (sym, e))
+        try:
+            closed, tick = self.bars.bars(sym, self.now, fresh=True)
+        except BotError:
+            return None
+        if tick and tick.get("price"):
+            return float(tick["price"])
+        return float(closed[-1]["c"]) if closed else None
 
     # ---- summaries
 
@@ -1472,6 +1573,8 @@ MENU = [
      ["run", "--mode", "auto", "--broker", "mt5"]),
     ("c", "Run today, live, confirm mode on MetaTrader 5: you type yes or no for each order",
      ["run", "--mode", "confirm", "--broker", "mt5"]),
+    ("a", "Account at the broker: balance, equity, open positions", ["account"]),
+    ("k", "Kill switch: close every position and halt the day", ["flatten"]),
     ("s", "Status of the current session", ["status", "--events", "15"]),
     ("u", "Check for a newer version and install it (one key, the app restarts on the new one)", ["update"]),
     ("e", "Edit the settings (opens the trader folder)", None),
@@ -1665,6 +1768,7 @@ def main(argv=None):
     p.add_argument("--no-prompt", action="store_true", help="do not ask for symbols before a run")
     p = sub.add_parser("gui", help="the window (what the installed app opens with)")
     p.add_argument("--dir")
+    desk.add_parsers(sub, common)
     p = sub.add_parser("update", help="check the release list; download, verify and install a newer version")
     p.add_argument("--dir")
     p.add_argument("--url", help="the release manifest (default: update.url in trader/bot.json)")
@@ -1679,8 +1783,10 @@ def main(argv=None):
         ap.print_help()
         return 1
     try:
-        code = {"init": cmd_init, "run": cmd_run, "once": cmd_once, "replay": cmd_replay, "status": cmd_status,
-                "menu": cmd_menu, "gui": cmd_gui, "update": cmd_update}[a.cmd](a)
+        commands = {"init": cmd_init, "run": cmd_run, "once": cmd_once, "replay": cmd_replay, "status": cmd_status,
+                    "menu": cmd_menu, "gui": cmd_gui, "update": cmd_update}
+        commands.update(desk.COMMANDS)
+        code = commands[a.cmd](a)
     except BotError as e:
         print("trader-bot: %s" % e, file=sys.stderr)
         code = 1
@@ -1695,6 +1801,11 @@ def main(argv=None):
             pass
     return code
 
+
+# desk.py imports bot. A test loader executes this file under another name, so register
+# it before that import or desk would load a second copy and its errors would slip past main.
+sys.modules.setdefault("bot", sys.modules[__name__])
+import desk  # noqa: E402  (the desk's commands: account, order, close, flatten, settings, live, creds)
 
 if __name__ == "__main__":
     sys.exit(main())

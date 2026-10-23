@@ -4,6 +4,24 @@ The installed app reads the newest entry's notes from `releases/latest.json`
 and shows them next to its "Update to ..." button. Keep the newest version at
 the top, one `## <version> (<date>)` heading per release.
 
+## 2.4.0 (2026-10-23)
+
+- A trading desk in the window: Connect shows balance, equity, today's P&L
+  and the open positions. Place order sends one bracket (stop and target)
+  through the same size, risk and ticket gates as the bot. Close selected
+  sells that position. FLATTEN ALL closes every position, cancels open
+  orders and halts the day.
+- Broker tab: Alpaca key and secret, and a MetaTrader 5 login, server and
+  password. Saved values go to trader\state\vault.json, encrypted with
+  Windows DPAPI for your user (on other systems the file is readable by you
+  only). An environment variable still wins, and the values are never printed.
+- Settings tab: edit the budget, the loss limits, the flat-by time and the
+  prop-firm percentages. Switch to a LIVE account only by typing TRADE REAL
+  MONEY. Auto mode on that live account stays off until you tick it and type
+  the same phrase.
+- Console: `account`, `positions`, `order`, `close`, `flatten`, `resume`,
+  `settings`, `live`, `creds`. The menu keys are `a` and `k`.
+
 ## 2.3.0 (2026-10-23)
 
 - One-click updates. The window checks the release list when it opens and
