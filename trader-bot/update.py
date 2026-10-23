@@ -14,10 +14,10 @@ A release publishes two files next to each other: the installer
 
 The app reads the manifest from `update.url` in trader/bot.json (an https
 URL, a file path, or a network share; the installer's url may be relative to
-it), compares the version with its own, and on one click downloads the
-installer, checks its SHA-256 and size, and runs it silently in place. Inno
-Setup upgrades the same AppId without asking anything, then the window comes
-back on the new version. Nothing is downloaded or run without that click.
+it), compares the version with its own, and on one click downloads the new
+version, checks its SHA-256 and size, and replaces the files in the same
+folder. The window comes back on the new version. Settings stay. Nothing is
+downloaded or run without that click.
 
     python3 bot.py update --check            # is there a newer version?
     python3 bot.py update                    # download, verify, install (asks first)
@@ -203,21 +203,31 @@ def download(manifest, dest_dir=None, progress=None):
     return path
 
 
-def installer_args(path, relaunch=None):
-    """The command that upgrades in place: Inno Setup's silent switches, then the
-    app again. The chain runs in its own console so it outlives the caller."""
-    setup = [path, "/SILENT", "/NORESTART", "/SUPPRESSMSGBOXES", "/CLOSEAPPLICATIONS"]
+def installer_args(path, relaunch=None, directory=None):
+    """The command that updates the copy already installed. /DIR keeps that folder.
+    The chain runs in its own console so it outlives the caller."""
+    setup = [path, "/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES", "/CLOSEAPPLICATIONS"]
+    if directory:
+        setup.append("/DIR=%s" % directory)
     if not relaunch:
         return setup, False
-    line = 'start "" /wait "%s" %s && start "" "%s"' % (path, " ".join(setup[1:]), relaunch)
+    flags = []
+    for arg in setup[1:]:
+        if arg.startswith("/DIR="):
+            flags.append('/DIR="%s"' % arg[len("/DIR="):])
+        else:
+            flags.append(arg)
+    line = 'start "" /wait "%s" %s && start "" "%s"' % (path, " ".join(flags), relaunch)
     return ["cmd", "/c", line], True
 
 
-def install(path, relaunch=None):
-    """Start the installer and return at once; the caller exits so files can be replaced."""
+def install(path, relaunch=None, directory=None):
+    """Start the update and return at once; the caller exits so files can be replaced."""
     if sys.platform != "win32":
         raise UpdateError("the installer is a Windows program; on this system run it yourself: %s" % path)
-    args, via_cmd = installer_args(path, relaunch)
+    if directory is None and getattr(sys, "frozen", False):
+        directory = os.path.dirname(sys.executable)
+    args, via_cmd = installer_args(path, relaunch, directory)
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     subprocess.Popen(args, creationflags=flags, close_fds=True)
     return args

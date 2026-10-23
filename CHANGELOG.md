@@ -4,6 +4,13 @@ The installed app reads the newest entry's notes from `releases/latest.json`
 and shows them next to its "Update to ..." button. Keep the newest version at
 the top, one `## <version> (<date>)` heading per release.
 
+## 2.4.5 (2026-10-23)
+
+- Update stays on this copy. Check for updates, then "Update to ...", replaces
+  the files already installed and opens the window again on the new version.
+  Settings in the DayTraderBot folder stay. A new setup file is only for a PC
+  that has never had the app. FLATTEN ALL still closes everything.
+
 ## 2.4.4 (2026-10-23)
 
 - This build replaces the installer on the GitHub release. Check for updates

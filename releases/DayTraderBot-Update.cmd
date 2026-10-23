@@ -3,13 +3,13 @@ rem DayTraderBot-Update.cmd: the one-file updater for Day Trader Bot.
 rem
 rem Double-click it, or run it from a Command Prompt. It reads the release list
 rem (latest.json), compares with the installed version, downloads the newer
-rem installer, checks its SHA-256 and size against the release list, and runs
-rem the installer silently over the current version. Settings in
+rem version, checks its SHA-256 and size against the release list, and replaces
+rem the files in the current install folder. Settings in
 rem %USERPROFILE%\DayTraderBot are kept. Nothing is run that fails the check.
 rem
-rem   DayTraderBot-Update.cmd                         ask, then install
+rem   DayTraderBot-Update.cmd                         ask, then update this copy
 rem   DayTraderBot-Update.cmd -Check                  only say whether a newer version exists
-rem   DayTraderBot-Update.cmd -Yes                    install without asking
+rem   DayTraderBot-Update.cmd -Yes                    update without asking
 rem   DayTraderBot-Update.cmd -Url \\nas\share\latest.json   a release list somewhere else
 rem
 rem Where the release list lives: -Url, else the DAYTRADERBOT_UPDATE_URL
@@ -106,9 +106,9 @@ try {
     Write-Host ""
     Write-Host "Day Trader Bot $($m.version) is available$(if ($m.published) { ', published ' + $m.published })."
     if ($m.notes) { Write-Host ""; Write-Host $m.notes; Write-Host "" }
-    if ($Check) { Write-Host "Run this file again without -Check to install it."; exit 0 }
+    if ($Check) { Write-Host "Run this file again without -Check to update this copy."; exit 0 }
     if (-not $Yes) {
-        $r = Read-Host "Download and install $($m.version) now? (yes/no)"
+        $r = Read-Host "Update to $($m.version) now? (yes/no)"
         if ($r -notmatch '^(y|yes)$') { Write-Host "Not now. Nothing was downloaded."; exit 0 }
     }
 
@@ -133,15 +133,17 @@ try {
         throw "the download's SHA-256 does not match the release list (got $($hash.Substring(0,16))..., want $(([string]$m.installer.sha256).Substring(0,16))...). Not installed."
     }
     Write-Host "Verified $name ($size bytes, SHA-256 matches the release list)."
-    if ($DownloadOnly) { Write-Host "Saved to $path. Double-click it to install."; exit 0 }
+    if ($DownloadOnly) { Write-Host "Saved to $path."; exit 0 }
 
     $running = Get-Process -Name 'DayTraderBot', 'DayTraderBotCLI' -ErrorAction SilentlyContinue
     if ($running) { throw "Day Trader Bot is running. Close it first (open positions stay at the broker with their bracket orders), then run this again." }
-    Write-Host "Installing Day Trader Bot $($m.version) silently..."
-    $p = Start-Process -FilePath $path -ArgumentList '/SILENT', '/NORESTART', '/SUPPRESSMSGBOXES', '/CLOSEAPPLICATIONS' -Wait -PassThru
-    if ($p.ExitCode -ne 0) { throw "the installer returned exit code $($p.ExitCode)" }
+    Write-Host "Updating Day Trader Bot to $($m.version)..."
+    $setupArgs = @('/VERYSILENT', '/NORESTART', '/SUPPRESSMSGBOXES', '/CLOSEAPPLICATIONS')
+    if ($inst -and $inst.Dir) { $setupArgs += ('/DIR=' + $inst.Dir) }
+    $p = Start-Process -FilePath $path -ArgumentList $setupArgs -Wait -PassThru
+    if ($p.ExitCode -ne 0) { throw "the update returned exit code $($p.ExitCode)" }
     $after = Get-Installed
-    Write-Host "Done: Day Trader Bot $(if ($after) { $after.Version } else { $m.version }) is installed$(if ($after -and $after.Dir) { ' in ' + $after.Dir }). Open it from the Start menu."
+    Write-Host "Done: Day Trader Bot $(if ($after) { $after.Version } else { $m.version }) is ready$(if ($after -and $after.Dir) { ' in ' + $after.Dir }). Open it from the Start menu."
     exit 0
 } catch {
     Write-Host ""

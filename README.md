@@ -339,9 +339,10 @@ window is `python3 trader-bot/bot.py gui` (Debian/Ubuntu need `python3-tk`).
 **Updates are one click.** When the window opens it reads a small release
 list (`latest.json`) in the background; if a newer version is out, the
 top-right button says "Update to 2.4.0" and the log shows the notes from
-`CHANGELOG.md`. One click downloads the new installer, checks its SHA-256
-and size against the release list, installs it over the current version
-silently (same install folder, settings untouched) and reopens the window.
+`CHANGELOG.md`. One click updates the copy already on this PC: it downloads
+the new version, checks its SHA-256 and size, replaces the files in the same
+folder, and reopens the window. Settings stay. A setup file is for a PC that
+has never had the app.
 `DayTraderBotCLI update` does the same from the console (`--check` only
 asks, `--yes` skips the question, `--download-only` just saves the verified
 installer), and the console menu has it as `u`. Nothing is downloaded or

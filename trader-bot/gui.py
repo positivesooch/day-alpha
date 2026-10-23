@@ -1171,8 +1171,8 @@ class App(object):
             return
         self.update_info = result
         self.btn_update.configure(state="normal", text="Update to %s" % result["latest"])
-        self.append("Day Trader Bot %s is available (you have %s). Click \"Update to %s\" at the top right: "
-                    "it downloads the installer, checks it, installs over this version and reopens the window.\n%s\n"
+        self.append("Day Trader Bot %s is available (you have %s). Click \"Update to %s\" at the top right. "
+                    "It updates this copy and opens the window again. Your settings stay.\n%s\n"
                     % (result["latest"], VERSION, result["latest"],
                        ("\n" + result["notes"] + "\n") if result["notes"] else ""), "prompt")
         if not quiet:
@@ -1186,11 +1186,11 @@ class App(object):
             messagebox.showinfo("Updates", "The bot is running. Stop it first, then update.")
             return
         if not messagebox.askyesno("Update to %s" % info["latest"],
-                                   "Download Day Trader Bot %s (%s MB), verify it, and install it over %s now?\n\n"
-                                   "The window closes while the installer runs and opens again on the new version. "
-                                   "Your settings and sessions in %s are kept."
-                                   % (info["latest"], round(int(info["manifest"]["installer"].get("size") or 0)
-                                                            / 1048576.0, 1), VERSION, self.home)):
+                                   "Update this copy from %s to %s (%s MB)?\n\n"
+                                   "The window closes for a moment and opens again on %s. "
+                                   "Your settings and sessions in %s stay."
+                                   % (VERSION, info["latest"], round(int(info["manifest"]["installer"].get("size") or 0)
+                                                                     / 1048576.0, 1), info["latest"], self.home)):
             return
         self.update_busy = True
         self.btn_update.configure(state="disabled", text="Downloading...")

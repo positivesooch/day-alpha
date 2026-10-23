@@ -38,7 +38,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.4.4"
+VERSION = "2.4.5"
 
 # Frozen (the Windows build made by installer/DayTraderBot.spec): the pack's
 # folders are bundled under <bundle>/pack, and the exe itself is the Python
@@ -1584,7 +1584,7 @@ MENU = [
     ("a", "Account at the broker: balance, equity, open positions", ["account"]),
     ("k", "Kill switch: close every position and halt the day", ["flatten"]),
     ("s", "Status of the current session", ["status", "--events", "15"]),
-    ("u", "Check for a newer version and install it (one key, the app restarts on the new one)", ["update"]),
+    ("u", "Check for a newer version and update this copy (one key, the app restarts on the new one)", ["update"]),
     ("e", "Edit the settings (opens the trader folder)", None),
     ("q", "Quit", None),
 ]
@@ -1684,11 +1684,11 @@ def cmd_update(a, input_fn=None, out=None):
     if info["notes"]:
         out.write("\n" + info["notes"] + "\n\n")
     if getattr(a, "check", False):
-        out.write("Run `update` without --check to install it.\n")
+        out.write("Run `update` without --check to update this copy.\n")
         return 0
     if not getattr(a, "yes", False):
         try:
-            reply = ask("Download and install %s now? Reply yes or no: " % info["latest"])
+            reply = ask("Update to %s now? Reply yes or no: " % info["latest"])
         except EOFError:
             reply = ""
         if (reply or "").strip().lower() not in ("y", "yes"):
@@ -1711,7 +1711,7 @@ def cmd_update(a, input_fn=None, out=None):
         args = updater.install(path, relaunch=updater.app_exe() if getattr(a, "relaunch", False) else None)
     except updater.UpdateError as e:
         raise BotError(str(e))
-    out.write("Installing %s. This program closes now; the new version opens from the Start menu%s.\n"
+    out.write("Updating to %s. This program closes now; the new version opens from the Start menu%s.\n"
               % (info["latest"], " and comes back by itself" if args[0] == "cmd" else ""))
     out.flush()
     return 0

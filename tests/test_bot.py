@@ -1141,12 +1141,16 @@ class Updates(unittest.TestCase):
 
     def test_the_installer_command_is_silent_and_relaunches(self):
         args, via_cmd = updater.installer_args(r"C:\t\Setup.exe")
-        self.assertEqual(args[:3], [r"C:\t\Setup.exe", "/SILENT", "/NORESTART"])
+        self.assertEqual(args[:3], [r"C:\t\Setup.exe", "/VERYSILENT", "/NORESTART"])
         self.assertIn("/CLOSEAPPLICATIONS", args)
+        self.assertNotIn("/DIR=", " ".join(args))
         self.assertFalse(via_cmd)
-        args, via_cmd = updater.installer_args(r"C:\t\Setup.exe", relaunch=r"C:\App\DayTraderBot.exe")
+        args, via_cmd = updater.installer_args(
+            r"C:\t\Setup.exe", relaunch=r"C:\App\DayTraderBot.exe",
+            directory=r"C:\Program Files\Day Trader Bot")
         self.assertEqual(args[:2], ["cmd", "/c"])
-        self.assertIn('start "" /wait "C:\\t\\Setup.exe" /SILENT', args[2])
+        self.assertIn('start "" /wait "C:\\t\\Setup.exe" /VERYSILENT', args[2])
+        self.assertIn('/DIR="C:\\Program Files\\Day Trader Bot"', args[2])
         self.assertTrue(args[2].endswith('&& start "" "C:\\App\\DayTraderBot.exe"'))
         if sys.platform != "win32":
             with self.assertRaises(updater.UpdateError):
@@ -1208,7 +1212,8 @@ class Updates(unittest.TestCase):
         self.assertNotIn(b"\n\n\n\n", raw.replace(b"\r", b""))
         text = raw.decode("utf-8")
         self.assertEqual(text.count("#" + "POWERSHELL-BEGIN"), 1)  # the batch side spells it in two halves on purpose
-        self.assertIn("/SILENT", text)
+        self.assertIn("/VERYSILENT", text)
+        self.assertIn("/DIR=", text)
         self.assertIn("Get-FileHash", text)
         with open(os.path.join(ROOT, "installer", "DayTraderBot.iss"), encoding="utf-8") as fh:
             app_id = re.search(r"AppId=\{\{([0-9A-F-]+)\}", fh.read()).group(1)
