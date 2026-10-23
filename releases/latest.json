@@ -1,12 +1,12 @@
 {
   "name": "Day Trader Bot",
-  "version": "2.4.0",
+  "version": "2.4.1",
   "published": "2026-10-23",
   "installer": {
-    "url": "DayTraderBot-Setup-2.4.0.exe",
-    "file": "DayTraderBot-Setup-2.4.0.exe",
-    "sha256": "6b7ac35d42e5ecf0a4ddba17cfbd6ca2edf835fb6118c9d5a6033f2a629ca626",
-    "size": 18006805
+    "url": "DayTraderBot-Setup-2.4.1.exe",
+    "file": "DayTraderBot-Setup-2.4.1.exe",
+    "sha256": "8b9e4a2d63972dc947c0739723f502035cedf0cdcbe2f728c6d7ef2a53664f9f",
+    "size": 18016182
   },
-  "notes": "- A trading desk in the window: Connect shows balance, equity, today's P&L\n  and the open positions. Place order sends one bracket (stop and target)\n  through the same size, risk and ticket gates as the bot. Close selected\n  sells that position. FLATTEN ALL closes every position, cancels open\n  orders and halts the day.\n- Broker tab: Alpaca key and secret, and a MetaTrader 5 login, server and\n  password. Saved values go to trader\\state\\vault.json, encrypted with\n  Windows DPAPI for your user (on other systems the file is readable by you\n  only). An environment variable still wins, and the values are never printed.\n- Settings tab: edit the budget, the loss limits, the flat-by time and the\n  prop-firm percentages. Switch to a LIVE account only by typing TRADE REAL\n  MONEY. Auto mode on that live account stays off until you tick it and type\n  the same phrase.\n- Console: `account`, `positions`, `order`, `close`, `flatten`, `resume`,\n  `settings`, `live`, `creds`. The menu keys are `a` and `k`."
+  "notes": "- Stocks and commodities. The Bot tab lists every stock type (index ETFs,\n  technology, communication, consumer discretionary, consumer staples,\n  healthcare, financials, industrials, energy, materials, utilities, real\n  estate) and commodities (metals, energy, agriculture, livestock, baskets).\n  Alpaca watches the stock and the commodity ETF (GLD, USO, CORN). The sim\n  and MetaTrader 5 also watch the futures (GC=F gold as XAUUSD, CL=F oil as\n  USOIL, and the grains, softs, and livestock). All US common stocks turns\n  the scanner onto Nasdaq Trader's list.\n- Run live, auto. One button on the Bot tab arms the live account and starts\n  today's session in auto mode, so the bot places its own orders on Alpaca's\n  live API or the MetaTrader 5 account without a yes for each ticket. It asks\n  once, and it asks you to type TRADE REAL MONEY. The sim broker stays paper\n  only. FLATTEN ALL still closes everything."
 }
