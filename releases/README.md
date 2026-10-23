@@ -4,7 +4,7 @@ Built Windows installers, for people who cannot build one themselves.
 
 | file | version | SHA-256 |
 | --- | --- | --- |
-| DayTraderBot-Setup-2.4.7.exe | 2.4.7 | `98c8338514b30c04bf1b33df0f28e516d5f2240fa9d194272ad01131018f8fd2` |
+| DayTraderBot-Setup-2.4.8.exe | 2.4.8 | `fc947795df7263c8ee661811402b164a2ef8a926953668e9b967305c39f15f3f` |
 
 Download the .exe and double-click it. It is not code-signed, so SmartScreen
 will say "Windows protected your PC": click "More info", then "Run anyway".
