@@ -1465,7 +1465,19 @@ class App(object):
         self._refresh_header()
 
 
+def _ensure_stdio():
+    """A windowed exe has no console: stdout and stderr are None, and writing them crashes."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    sink = open(os.devnull, "w", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = sink
+    if sys.stderr is None:
+        sys.stderr = sink
+
+
 def main(argv=None):
+    _ensure_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
     home = None
     if argv[:1] == ["--dir"] and len(argv) > 1:

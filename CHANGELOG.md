@@ -4,6 +4,12 @@ The installed app reads the newest entry's notes from `releases/latest.json`
 and shows them next to its "Update to ..." button. Keep the newest version at
 the top, one `## <version> (<date>)` heading per release.
 
+## 2.4.9 (2026-10-23)
+
+- The window stays open when trader\state\bot.json is damaged. The installed
+  app has no console, so the repair note no longer crashes the window.
+  Readable trades are kept. FLATTEN ALL still closes everything.
+
 ## 2.4.8 (2026-10-23)
 
 - A damaged session file (trader\state\bot.json) no longer stops the bot.

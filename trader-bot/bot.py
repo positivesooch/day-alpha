@@ -39,7 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.4.8"
+VERSION = "2.4.9"
 
 # Frozen (the Windows build made by installer/DayTraderBot.spec): the pack's
 # folders are bundled under <bundle>/pack, and the exe itself is the Python
@@ -360,11 +360,24 @@ def _copy_aside(path):
 STATE_NOTE = None
 
 
+def _note_state(text):
+    """Remember text for the window. The windowed exe has no console, so stderr is None."""
+    global STATE_NOTE
+    STATE_NOTE = text
+    err = sys.stderr
+    if err is None:
+        return
+    try:
+        err.write("trader-bot: %s\n" % text)
+        err.flush()
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
 def read_state(path):
     """The session at path. A damaged file is copied aside. Trades that can still
     be read are written back; otherwise the bad file is moved aside and this
     returns None so the bot can start a fresh session."""
-    global STATE_NOTE
     if not path or not os.path.exists(path):
         return None
     try:
@@ -378,9 +391,8 @@ def read_state(path):
             os.remove(path)
         except OSError:
             pass
-        STATE_NOTE = ("%s could not be read (%s). It was moved to %s. The bot will start a fresh session. "
-                      "Check open positions at the broker before you run it." % (path, e, dest))
-        sys.stderr.write("trader-bot: %s\n" % STATE_NOTE)
+        _note_state("%s could not be read (%s). It was moved to %s. The bot will start a fresh session. "
+                    "Check open positions at the broker before you run it." % (path, e, dest))
         return None
     try:
         doc = json.loads(text)
@@ -395,17 +407,15 @@ def read_state(path):
             except OSError:
                 keep = False
         if keep:
-            STATE_NOTE = ("%s is not valid JSON (%s). A copy is at %s. The readable trades were kept."
-                          % (path, e, dest))
-            sys.stderr.write("trader-bot: %s\n" % STATE_NOTE)
+            _note_state("%s is not valid JSON (%s). A copy is at %s. The readable trades were kept."
+                        % (path, e, dest))
             return salvaged
         try:
             os.remove(path)
         except OSError:
             pass
-        STATE_NOTE = ("%s is not valid JSON (%s). It was moved to %s. The bot will start a fresh session. "
-                      "Check open positions at the broker before you run it." % (path, e, dest))
-        sys.stderr.write("trader-bot: %s\n" % STATE_NOTE)
+        _note_state("%s is not valid JSON (%s). It was moved to %s. The bot will start a fresh session. "
+                    "Check open positions at the broker before you run it." % (path, e, dest))
         return None
     return doc if isinstance(doc, dict) else None
 

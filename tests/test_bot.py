@@ -655,6 +655,17 @@ class Config(unittest.TestCase):
             self.assertTrue(any(name.startswith("bot.json.broken") for name in os.listdir(folder)))
             self.assertIn("readable trades were kept", err.getvalue())
             self.assertIn("not valid JSON", err.getvalue())
+            # the windowed exe has no console: stderr is None and must not crash the repair
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(broken)
+            old_err = sys.stderr
+            sys.stderr = None
+            try:
+                again = bot.read_state(path)
+            finally:
+                sys.stderr = old_err
+            self.assertEqual(again["positions"]["TJX"]["qty"], 25)
+            self.assertIn("readable trades were kept", bot.STATE_NOTE)
             code, text, err = run(["status", "--dir", d])
             self.assertEqual(code, 0, err)
             self.assertIn("open   TJX: 25 x $146.63", text)
