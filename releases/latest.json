@@ -1,12 +1,12 @@
 {
   "name": "Day Trader Bot",
-  "version": "2.4.4",
+  "version": "2.4.5",
   "published": "2026-10-23",
   "installer": {
-    "url": "https://github.com/positivesooch/day-alpha/releases/download/v2.4.4/DayTraderBot-Setup-2.4.4.exe",
-    "file": "DayTraderBot-Setup-2.4.4.exe",
-    "sha256": "0aa0d9ff7a101eb3eae954487bd1df8d86be9aa6024fbe519046fb4b018f0285",
-    "size": 18607142
+    "url": "https://github.com/positivesooch/day-alpha/releases/download/v2.4.5/DayTraderBot-Setup-2.4.5.exe",
+    "file": "DayTraderBot-Setup-2.4.5.exe",
+    "sha256": "4223b40a3ef2aafb1d765e50498df32bf32d3d9cb53ac224521ec6dc80b3b303",
+    "size": 18608368
   },
-  "notes": "- This build replaces the installer on the GitHub release. Check for updates\n  downloads it from the positivesooch/day-alpha release. FLATTEN ALL still\n  closes everything."
+  "notes": "- Update stays on this copy. Check for updates, then \"Update to ...\", replaces\n  the files already installed and opens the window again on the new version.\n  Settings in the DayTraderBot folder stay. A new setup file is only for a PC\n  that has never had the app. FLATTEN ALL still closes everything."
 }
