@@ -328,7 +328,10 @@ https URL (the default points at this repository's GitHub releases, where
 the Windows workflow publishes `latest.json` next to each installer), or a
 folder or network share for a team that distributes the installer itself.
 `DAYTRADERBOT_UPDATE_URL` overrides it; `"check_on_start": false` turns the
-automatic check off. Every build writes `latest.json` with
+automatic check off. `releases\DayTraderBot-Update.cmd` is the same updater as one
+double-clickable file (batch outside, Windows PowerShell inside), for a PC
+whose installed version predates the button or for a scheduled task:
+`-Check`, `-Yes`, `-DownloadOnly`, `-Url`. Every build writes `latest.json` with
 `installer\make_manifest.py` (its notes come from the version's section in
 `CHANGELOG.md`), so publishing a release is: bump `VERSION` in `bot.py`,
 add the changelog entry, tag, and copy the two files wherever `update.url`

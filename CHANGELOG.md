@@ -14,6 +14,10 @@ the top, one `## <version> (<date>)` heading per release.
   the menu has it as `u`. `update.url` in `trader\bot.json` says where the
   release list lives (an https URL, a folder or a network share); nothing is
   downloaded or run without your click.
+- `releases\DayTraderBot-Update.cmd`: the updater as one double-clickable
+  file (batch outside, Windows PowerShell inside) for PCs on 2.2.0, which has
+  no updater built in, and for scheduled tasks. `-Check`, `-Yes`,
+  `-DownloadOnly`, `-Url`.
 - `installer\make_manifest.py` writes `latest.json` for a built installer;
   `build.ps1` and the Windows workflow call it, and the workflow attaches it
   to the release next to the installer.

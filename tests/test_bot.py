@@ -4,6 +4,7 @@ import gzip
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -1179,6 +1180,51 @@ class Updates(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("update check failed", err)
         self.assertIn(["update"], [argv for _, _, argv in bot.MENU])
+
+    def test_the_one_file_updater_cmd(self):
+        path = os.path.join(ROOT, "releases", "DayTraderBot-Update.cmd")
+        with open(path, "rb") as fh:
+            raw = fh.read()
+        self.assertTrue(raw.startswith(b"@echo off"))
+        self.assertIn(b"\r\n", raw)
+        self.assertNotIn(b"\n\n\n\n", raw.replace(b"\r", b""))
+        text = raw.decode("utf-8")
+        self.assertEqual(text.count("#" + "POWERSHELL-BEGIN"), 1)  # the batch side spells it in two halves on purpose
+        self.assertIn("/SILENT", text)
+        self.assertIn("Get-FileHash", text)
+        with open(os.path.join(ROOT, "installer", "DayTraderBot.iss"), encoding="utf-8") as fh:
+            app_id = re.search(r"AppId=\{\{([0-9A-F-]+)\}", fh.read()).group(1)
+        self.assertIn("{%s}_is1" % app_id, text)
+        self.assertIn(updater.DEFAULT_URL, text)
+        pwsh = shutil.which("pwsh") or shutil.which("powershell") or (
+            "/home/ubuntu/pwsh/pwsh" if os.path.exists("/home/ubuntu/pwsh/pwsh") else None)
+        if not pwsh:
+            self.skipTest("no PowerShell here to run the payload")
+        import subprocess as sp
+        updater.write_manifest(self.exe, "9.9.0", notes="Big news.")
+        env = dict(os.environ, DTB_SELF=path, DTB_ARGS='-Url "%s" -Check' % os.path.join(self.d, "latest.json"))
+        env.pop("DAYTRADERBOT_UPDATE_URL", None)
+        cmd = ("$f = Get-Content -LiteralPath $env:DTB_SELF -Raw; $i = $f.IndexOf('#' + 'POWERSHELL-BEGIN'); "
+               "& ([scriptblock]::Create($f.Substring($i))); exit $LASTEXITCODE")
+        out = sp.run([pwsh, "-NoProfile", "-Command", cmd], capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("Day Trader Bot 9.9.0 is available", out.stdout)
+        self.assertIn("Big news.", out.stdout)
+        env["DTB_ARGS"] = '-Url "%s" -Yes -DownloadOnly' % os.path.join(self.d, "latest.json")
+        env["TEMP"] = os.path.join(self.d, "tmp")
+        out = sp.run([pwsh, "-NoProfile", "-Command", cmd], capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("SHA-256 matches", out.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.d, "tmp", "DayTraderBot-update", "DayTraderBot-Setup-9.9.0.exe")))
+        with open(os.path.join(self.d, "latest.json")) as fh:
+            m = json.load(fh)
+        m["installer"]["sha256"] = "0" * 64
+        m["version"] = "9.9.1"
+        with open(os.path.join(self.d, "latest.json"), "w") as fh:
+            json.dump(m, fh)
+        out = sp.run([pwsh, "-NoProfile", "-Command", cmd], capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("SHA-256 does not match", out.stdout)
 
 
 if __name__ == "__main__":
