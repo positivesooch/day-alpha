@@ -352,15 +352,19 @@ https URL (the default is
 `https://github.com/positivesooch/day-alpha/releases/latest/download/latest.json`,
 where each release publishes `latest.json` next to the installer), or a
 folder or network share for a team that distributes the installer itself.
+A push to `main` on that GitHub repository builds the installer again and
+replaces the release files, so the download is the newest build. The in-app
+button offers it when the version number goes up (the workflow raises the
+patch number when a push leaves it unchanged).
 `DAYTRADERBOT_UPDATE_URL` overrides it; `"check_on_start": false` turns the
 automatic check off. `releases\DayTraderBot-Update.cmd` is the same updater as one
 double-clickable file (batch outside, Windows PowerShell inside), for a PC
 whose installed version predates the button or for a scheduled task:
 `-Check`, `-Yes`, `-DownloadOnly`, `-Url`. Every build writes `latest.json` with
 `installer\make_manifest.py` (its notes come from the version's section in
-`CHANGELOG.md`), so publishing a release is: bump `VERSION` in `bot.py`,
-add the changelog entry, tag, and copy the two files wherever `update.url`
-points.
+`CHANGELOG.md`). A push to `main` publishes that build: the workflow raises
+the patch number when `VERSION` was left unchanged, then replaces the
+installer, `latest.json`, and the updater on the GitHub release.
 
 Build it yourself on Windows with Python 3.8+ and
 [Inno Setup 6](https://jrsoftware.org/isinfo.php) installed:

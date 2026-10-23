@@ -27,4 +27,4 @@ Serve these two files from any https URL, folder or network share and point
 versions are one click inside the app.
 
 The build is reproducible from this repository with installer\build.ps1
-(see the README), or by the Windows installer workflow on a tag.
+(see the README). A push to main runs that build and replaces these files.

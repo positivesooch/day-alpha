@@ -2,8 +2,18 @@ name: Windows installer
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+
+# One publish at a time. A newer push waits, so two builds cannot replace
+# the release at the same moment.
+concurrency:
+  group: publish-installer
+  cancel-in-progress: false
+
+permissions:
+  contents: write
 
 jobs:
   tests:
@@ -20,17 +30,25 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Inno Setup
         run: choco install innosetup --no-progress -y
+      - name: Raise the patch version when this push left it unchanged
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: python installer/release_version.py prepare
       - name: Build DayTraderBot.exe and the installer
         shell: pwsh
         run: |
           $version = (Select-String -Path trader-bot\bot.py -Pattern '^VERSION = "([^"]+)"').Matches[0].Groups[1].Value
           $url = "https://github.com/${{ github.repository }}/releases/download/v$version/DayTraderBot-Setup-$version.exe"
           powershell -ExecutionPolicy Bypass -File installer\build.ps1 -ManifestUrl $url
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Installer runs silently
         shell: pwsh
         run: |
@@ -39,20 +57,59 @@ jobs:
           & "$env:RUNNER_TEMP\DTB\DayTraderBotCLI.exe" --version
           & "$env:RUNNER_TEMP\DTB\DayTraderBotCLI.exe" replay --fixtures --fresh --quiet
           if (-not (Test-Path "$env:RUNNER_TEMP\DTB\DayTraderBot.exe")) { throw "no DayTraderBot.exe installed" }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: DayTraderBot-Setup
-          path: |
-            installer/Output/DayTraderBot-Setup-*.exe
-            installer/Output/latest.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: DayTraderBot-portable
-          path: dist/DayTraderBot/
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            installer/Output/DayTraderBot-Setup-*.exe
-            installer/Output/latest.json
+      - name: Replace the files on the GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # A missing release is the normal first publish. Do not abort on that exit code.
+          $PSNativeCommandUseErrorActionPreference = $false
+          $ErrorActionPreference = "Continue"
+          $version = $env:VERSION
+          if (-not $version) { throw "VERSION was not set by the build" }
+          $setup = "installer/Output/DayTraderBot-Setup-$version.exe"
+          $manifest = "installer/Output/latest.json"
+          $tag = "v$version"
+          python installer/release_version.py stage $setup
+          if ($LASTEXITCODE -ne 0) { throw "could not stage the installer" }
+
+          # Pushing with GITHUB_TOKEN does not start this workflow again.
+          if ("${{ github.event_name }}" -eq "push" -and "${{ github.ref }}" -eq "refs/heads/main") {
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git config user.name "github-actions[bot]"
+            git add -- trader-bot/bot.py CHANGELOG.md releases
+            $changed = @(git diff --cached --name-only)
+            if ($changed.Count -gt 0 -and $changed[0]) {
+              git commit -m "Replace the published installer with $version."
+              if ($LASTEXITCODE -ne 0) { throw "could not commit the installer" }
+              git push origin HEAD:main
+              if ($LASTEXITCODE -ne 0) { throw "could not push the installer to main" }
+            }
+          }
+
+          $files = @($setup, $manifest, "releases/DayTraderBot-Update.cmd")
+          gh release view $tag --json tagName | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            $log = Get-Content -Raw CHANGELOG.md
+            $pattern = "(?s)## " + [regex]::Escape($version) + "[^\r\n]*\r?\n(.*?)(?=\r?\n## |\z)"
+            $match = [regex]::Match($log, $pattern)
+            $notes = "Day Trader Bot $version"
+            if ($match.Success -and $match.Groups[1].Value.Trim()) {
+              $notes = $match.Groups[1].Value.Trim()
+            }
+            Set-Content -Path notes.txt -Value $notes -Encoding utf8NoBOM
+            gh release create $tag --title "Day Trader Bot $version" --notes-file notes.txt @files
+            if ($LASTEXITCODE -ne 0) { throw "could not create the release" }
+          } else {
+            gh release upload $tag @files --clobber
+            if ($LASTEXITCODE -ne 0) { throw "could not replace the release files" }
+          }
+          $names = @(gh release view $tag --json assets --jq ".assets[].name")
+          foreach ($name in $names) {
+            $name = "$name".Trim()
+            if (-not $name) { continue }
+            if ($name -like "DayTraderBot-Setup-*.exe" -and $name -ne "DayTraderBot-Setup-$version.exe") {
+              gh release delete-asset $tag $name --yes
+              if ($LASTEXITCODE -ne 0) { throw "could not remove the old installer $name" }
+            }
+          }
