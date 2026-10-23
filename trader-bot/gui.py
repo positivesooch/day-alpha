@@ -36,6 +36,7 @@ BUNDLE = getattr(sys, "_MEIPASS", None) or (os.path.dirname(sys.executable) if F
 PACK_BOT = os.path.join(BUNDLE, "pack", "trader-bot") if FROZEN else HERE
 sys.path.insert(0, PACK_BOT)
 import bot  # noqa: E402  (the same module the console runs)
+import markets  # noqa: E402  (stock sectors and commodities)
 import update as updater  # noqa: E402
 
 VERSION = bot.VERSION
@@ -275,12 +276,15 @@ class App(object):
         self.btn_reel.pack(side="left", padx=(0, 6))
         self.btn_run = ttk.Button(bar, text="Run today", command=lambda: self.launch("run"))
         self.btn_run.pack(side="left", padx=(0, 6))
+        self.btn_live_auto = ttk.Button(bar, text="Run live, auto", command=self.run_live_auto)
+        self.btn_live_auto.pack(side="left", padx=(0, 6))
         self.btn_status = ttk.Button(bar, text="Status", command=lambda: self.launch("status"))
         self.btn_status.pack(side="left", padx=(0, 6))
         self.btn_stop = ttk.Button(bar, text="Stop", command=self.stop, state="disabled")
         self.btn_stop.pack(side="left", padx=(0, 6))
         ttk.Button(bar, text="Settings folder", command=self.open_settings).pack(side="right")
         ttk.Button(bar, text="Clear log", command=self.clear).pack(side="right", padx=(0, 6))
+        self._build_markets(bot_tab)
         self._build_trade(trade_tab)
         self._build_broker(broker_tab)
         self._build_settings(settings_tab)
@@ -306,6 +310,81 @@ class App(object):
 
         self.status_var = tk.StringVar(value="idle")
         ttk.Label(r, textvariable=self.status_var, anchor="w", relief="sunken").pack(fill="x", side="bottom")
+
+    def _build_markets(self, tab):
+        box = ttk.LabelFrame(tab, text="Stocks and commodities. Pick types, then watch them. "
+                                        "Futures (gold, oil, corn) are added for the sim and MetaTrader 5; "
+                                        "Alpaca watches the ETFs (GLD, USO, CORN).")
+        box.pack(fill="x", padx=8, pady=(0, 6))
+        self.market_list = tk.Listbox(box, selectmode="extended", height=6, exportselection=False)
+        for g in markets.GROUPS:
+            self.market_list.insert("end", "%s (%s)" % (g["name"], "stocks" if g["kind"] == "stock" else "commodities"))
+        self.market_list.pack(fill="x", padx=6, pady=4)
+        row = ttk.Frame(box)
+        row.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Button(row, text="Watch selected", command=self.apply_markets).pack(side="left")
+        ttk.Button(row, text="All stock types", command=lambda: self.apply_markets(markets.ids_of("stock"))).pack(
+            side="left", padx=6)
+        ttk.Button(row, text="All commodities", command=lambda: self.apply_markets(markets.ids_of("commodity"))).pack(
+            side="left")
+        ttk.Button(row, text="Stocks and commodities",
+                   command=lambda: self.apply_markets(markets.ids_of())).pack(side="left", padx=6)
+        ttk.Button(row, text="All US common stocks", command=self.watch_all_us_stocks).pack(side="left")
+
+    def apply_markets(self, group_ids=None):
+        if group_ids is None:
+            group_ids = [markets.GROUPS[i]["id"] for i in self.market_list.curselection()]
+        if not group_ids:
+            messagebox.showinfo("Markets", "Select one or more types in the list.")
+            return
+        futures = self.broker_var.get() != "alpaca"
+        syms = markets.pick(group_ids, futures=futures)
+        self.symbols_var.set(",".join(syms))
+        self.trade_symbol.set(syms[0])
+        self.scan_var.set(False)
+        mapping = markets.mt5_map(group_ids) if futures else {}
+        if mapping:
+            current = {}
+            cfg = bot.read_json(os.path.join(self.home, "trader", "bot.json"), required=False) or {}
+            current.update((cfg.get("mt5") or {}).get("symbols") or {})
+            current.update(mapping)
+            self.desk(["settings", "--dir", self.home, "--set", "bot.mt5.symbols=%s" % json.dumps(current)])
+        self.append("Watching %d symbols (%s).\n" % (
+            len(syms), "stocks, commodity ETFs, and futures" if futures else "stocks and commodity ETFs"), "prompt")
+
+    def watch_all_us_stocks(self):
+        """Turn the scanner onto Nasdaq Trader's common-stock list, and download that list if it is missing."""
+        self.scan_var.set(True)
+        out = os.path.join(self.home, "trader", "universe.txt")
+        if os.path.exists(out) and os.path.getsize(out) > 0:
+            self.append("Scanner will use the US common-stock list in %s. Leave Symbols as they are, or clear "
+                        "them, and press Run. The bot still only takes a few trades a day.\n" % out, "prompt")
+            return
+        if FROZEN:
+            script = os.path.join(BUNDLE, "pack", "trader-scanner", "scan.py")
+            argv = cli_command() + ["--tool", script, "universe", "--out", out]
+        else:
+            script = os.path.join(os.path.dirname(HERE), "trader-scanner", "scan.py")
+            argv = [sys.executable, script, "universe", "--out", out]
+        self.append("Downloading the US common-stock list from Nasdaq Trader...\n", "prompt")
+        self.desk_busy = True
+
+        def work():
+            try:
+                p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   env=dict(os.environ, PYTHONIOENCODING="utf-8"), timeout=180)
+                text, code = p.stdout.decode("utf-8", "replace"), p.returncode
+            except Exception as e:
+                text, code = str(e), 1
+
+            def finish():
+                self.desk_busy = False
+                self._show(text if text.endswith("\n") else text + "\n")
+                if code == 0:
+                    self.append("US common stocks are ready. Press Run with the scanner ticked.\n", "good")
+                self.status_var.set("idle" if code == 0 else "idle (exit code %s)" % code)
+            self.root.after(0, finish)
+        threading.Thread(target=work, daemon=True).start()
 
     def _build_trade(self, tab):
         form = ttk.LabelFrame(tab, text="One bracket order (long only). Your limits still size it and can refuse it.")
@@ -431,14 +510,18 @@ class App(object):
                 format(cfg.get("budget", 0), ",.0f"), cfg.get("max_loss_per_trade_usd", "?")))
             self.account_lbl.configure(foreground="#1b7f3b")
         else:
-            self.account_var.set("LIVE account in your config: auto mode is off")
+            bcfg = bot.read_json(os.path.join(self.home, "trader", "bot.json"), required=False) or {}
+            armed = bool((bcfg.get("execution") or {}).get("allow_auto_on_live")
+                         or (bcfg.get("mt5") or {}).get("allow_auto_on_real"))
+            self.account_var.set("LIVE account, real money: auto mode is %s" % ("armed" if armed else "off"))
             self.account_lbl.configure(foreground="#b00020")
 
     def _explain_mode(self):
         text = {
             "dry-run": "dry-run: the whole method runs and nothing is placed.",
             "confirm": "confirm: each READY ticket is shown here and waits for your typed yes or no in the Reply box.",
-            "auto": "auto: the bot says yes itself. Paper accounts only; on a live account it refuses to start.",
+            "auto": "auto: the bot says yes itself. Paper accounts only, until Run live, auto arms the live "
+                    "account. That button then places orders on the live market with real money.",
         }[self.mode_var.get()]
         if self.broker_var.get() == "mt5":
             text += ("  MT5: the open terminal is the broker and the candle feed; the prop firm's daily loss and "
@@ -685,6 +768,40 @@ class App(object):
         argv = ["settings", "--dir", self.home] + sum([["--set", p] for p in pairs], [])
         self.desk(argv, done=lambda c, t: self.load_settings())
 
+    def run_live_auto(self):
+        """Arm the live account and start today's session in auto mode. One confirmation, then no per-order yes."""
+        broker = self.broker_var.get()
+        if broker == "sim":
+            messagebox.showerror("Live market",
+                                 "The sim broker is paper only. Pick Alpaca or MT5, save that login on the Broker tab, "
+                                 "then press Run live, auto.")
+            return
+        if (self.runner and self.runner.alive()) or self.desk_busy:
+            messagebox.showinfo("Busy", "The bot is already running. Stop it first.")
+            return
+        where = "Alpaca's live API (api.alpaca.markets, your live keys)" if broker == "alpaca" else (
+            "the MetaTrader 5 account the terminal is logged in to, including a REAL account")
+        if not messagebox.askyesno("Live market, auto",
+                                   "The bot will trade %s by itself today.\n\nBroker: %s.\nSymbols: %s.\n\n"
+                                   "It will not ask yes or no for each order. Your loss limits still apply. "
+                                   "FLATTEN ALL closes everything. Continue?"
+                                   % (where, broker, self.symbols_var.get().strip() or "(from settings)")):
+            return
+        if not self._ask_phrase():
+            return
+        self.mode_var.set("auto")
+        self._explain_mode()
+        self.desk(["live", "--on", "--auto", "on", "--confirm", bot.LIVE_PHRASE, "--json", "--dir", self.home],
+                  done=self._live_auto_armed)
+
+    def _live_auto_armed(self, code, text):
+        if code != 0:
+            self.append("Live auto was not armed. Nothing was started.\n", "bad")
+            return
+        self.auto_live_var.set(True)
+        self._refresh_header()
+        self.launch("run", skip_confirm=True)
+
     def switch_live(self):
         if not messagebox.askyesno("Live account",
                                    "Alpaca orders will go to the live API, and a MetaTrader 5 login may be a REAL "
@@ -711,7 +828,7 @@ class App(object):
 
     # ---- actions
 
-    def launch(self, action):
+    def launch(self, action, skip_confirm=False):
         if (self.runner and self.runner.alive()) or self.desk_busy:
             messagebox.showinfo("Busy", "The bot is already running. Stop it first.")
             return
@@ -721,7 +838,7 @@ class App(object):
         except ValueError as e:
             messagebox.showerror("Day Trader Bot", str(e))
             return
-        if action == "run" and mode == "auto" and not self._paper():
+        if not skip_confirm and action == "run" and mode == "auto" and not self._paper():
             if not messagebox.askyesno("Live account, hands off",
                                        "Auto mode on a LIVE account places orders with real money and does not ask "
                                        "again. It starts only if \"Let auto mode trade the live account\" is ticked "
@@ -743,7 +860,7 @@ class App(object):
         self.append("\n> %s\n\n" % describe(argv), "prompt")
         self.runner = Runner(argv).start()
         self.status_var.set("running: %s" % describe(argv))
-        for b in (self.btn_reel, self.btn_run, self.btn_status):
+        for b in (self.btn_reel, self.btn_run, self.btn_live_auto, self.btn_status):
             b.configure(state="disabled")
         self.btn_stop.configure(state="normal")
         self.reply_entry.configure(state="normal")
@@ -829,7 +946,7 @@ class App(object):
             return
         self.update_busy = True
         self.btn_update.configure(state="disabled", text="Downloading...")
-        for b in (self.btn_reel, self.btn_run, self.btn_status):
+        for b in (self.btn_reel, self.btn_run, self.btn_live_auto, self.btn_status):
             b.configure(state="disabled")
 
         def progress(got, total):
@@ -848,7 +965,7 @@ class App(object):
         self.update_busy = False
         self.status_var.set("idle")
         self.btn_update.configure(state="normal", text="Update to %s" % self.update_info["latest"])
-        for b in (self.btn_reel, self.btn_run, self.btn_status):
+        for b in (self.btn_reel, self.btn_run, self.btn_live_auto, self.btn_status):
             b.configure(state="normal")
         messagebox.showerror("Update failed", "Nothing was installed.\n\n%s" % err)
 
@@ -860,7 +977,7 @@ class App(object):
             self.update_busy = False
             messagebox.showinfo("Installer saved", "%s\n\nRun it yourself: %s" % (e, path))
             self.btn_update.configure(state="normal", text="Update to %s" % self.update_info["latest"])
-            for b in (self.btn_reel, self.btn_run, self.btn_status):
+            for b in (self.btn_reel, self.btn_run, self.btn_live_auto, self.btn_status):
                 b.configure(state="normal")
             return
         self.root.after(300, self.root.destroy)
@@ -912,7 +1029,7 @@ class App(object):
         code = self.runner.returncode
         self.status_var.set("idle" if code == 0 else "idle (exit code %s)" % code)
         self.append("\n[done%s]\n" % ("" if code == 0 else ", exit code %s" % code), "prompt" if code == 0 else "bad")
-        for b in (self.btn_reel, self.btn_run, self.btn_status):
+        for b in (self.btn_reel, self.btn_run, self.btn_live_auto, self.btn_status):
             b.configure(state="normal")
         self.btn_stop.configure(state="disabled")
         self.reply_entry.configure(state="disabled")

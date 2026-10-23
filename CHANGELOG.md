@@ -4,6 +4,22 @@ The installed app reads the newest entry's notes from `releases/latest.json`
 and shows them next to its "Update to ..." button. Keep the newest version at
 the top, one `## <version> (<date>)` heading per release.
 
+## 2.4.1 (2026-10-23)
+
+- Stocks and commodities. The Bot tab lists every stock type (index ETFs,
+  technology, communication, consumer discretionary, consumer staples,
+  healthcare, financials, industrials, energy, materials, utilities, real
+  estate) and commodities (metals, energy, agriculture, livestock, baskets).
+  Alpaca watches the stock and the commodity ETF (GLD, USO, CORN). The sim
+  and MetaTrader 5 also watch the futures (GC=F gold as XAUUSD, CL=F oil as
+  USOIL, and the grains, softs, and livestock). All US common stocks turns
+  the scanner onto Nasdaq Trader's list.
+- Run live, auto. One button on the Bot tab arms the live account and starts
+  today's session in auto mode, so the bot places its own orders on Alpaca's
+  live API or the MetaTrader 5 account without a yes for each ticket. It asks
+  once, and it asks you to type TRADE REAL MONEY. The sim broker stays paper
+  only. FLATTEN ALL still closes everything.
+
 ## 2.4.0 (2026-10-23)
 
 - A trading desk in the window: Connect shows balance, equity, today's P&L

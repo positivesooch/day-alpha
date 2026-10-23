@@ -196,6 +196,16 @@ itself, writes "nobody typed this" into the broker log, and works only while
 `trader/config.json` says `"paper": true`. On a live account it refuses to
 start unless `execution.allow_auto_on_live` was armed on purpose.
 
+**Stocks and commodities.** The window's market list is every stock type
+(index ETFs, technology, communication, consumer discretionary and staples,
+healthcare, financials, industrials, energy, materials, utilities, real
+estate) and commodities (metals, energy, agriculture, livestock, and the
+broad baskets). Alpaca trades the stocks and the commodity ETFs (`GLD`,
+`USO`, `CORN`). The sim and MetaTrader 5 also take the futures (`GC=F` as
+`XAUUSD`, `CL=F` as `USOIL`, and the grains, softs, and livestock). "All US
+common stocks" downloads Nasdaq Trader's common-stock list and lets the
+scanner look through it. The loss limits still cap how many trades a day.
+
 **Three brokers.** `sim` is a paper broker inside the bot that fills at the
 latest price and walks the bracket bar by bar (when one bar touches both the
 stop and the target, the stop wins). `alpaca` talks to Alpaca's REST API with
@@ -365,8 +375,11 @@ in `bot.json` to use the terminal's current login). Pick the `mt5` broker;
 the build script bundles the `MetaTrader5` package so the installed app
 needs nothing else. The Trade tab connects, shows the account and places or
 closes a position. FLATTEN ALL is the kill switch. Settings switches paper
-to a live account only after you type `TRADE REAL MONEY`. Picking auto mode
-with `mt5` asks you once more before it starts.
+to a live account only after you type `TRADE REAL MONEY`. **Run live, auto**
+does both steps and starts today's session in auto mode on Alpaca's live API
+or MetaTrader 5: the bot places orders without a yes for each one. The sim
+broker stays paper only. Picking auto mode with `mt5` asks you once more
+before it starts.
 
 ## Fine print
 

@@ -544,6 +544,7 @@ class Window(unittest.TestCase):
             self.assertEqual(app.book.tab(app.book.tabs()[1], "text"), "Trade")
             self.assertEqual(str(app.btn_flatten.cget("text")), "FLATTEN ALL")
             self.assertEqual(str(app.btn_connect.cget("text")), "Connect")
+            self.assertEqual(str(app.btn_live_auto.cget("text")), "Run live, auto")
             app.mode_var.set("auto")
             app._explain_mode()
             self.assertIn("Paper accounts only", app.mode_help.get())
@@ -1235,6 +1236,64 @@ class Updates(unittest.TestCase):
         out = sp.run([pwsh, "-NoProfile", "-Command", cmd], capture_output=True, text=True, env=env, timeout=120)
         self.assertEqual(out.returncode, 1)
         self.assertIn("SHA-256 does not match", out.stdout)
+
+
+class Markets(unittest.TestCase):
+    """Stock sectors and commodities the window can watch."""
+
+    def test_every_stock_type_and_every_commodity_group(self):
+        import markets
+        kinds = {}
+        for g in markets.GROUPS:
+            kinds.setdefault(g["kind"], set()).add(g["name"])
+            self.assertTrue(g["symbols"], g["id"])
+            self.assertEqual(list(g["symbols"]), [s.upper() for s in g["symbols"]])
+        self.assertIn("Technology", kinds["stock"])
+        self.assertIn("Healthcare", kinds["stock"])
+        self.assertIn("Financials", kinds["stock"])
+        self.assertIn("Energy stocks", kinds["stock"])
+        self.assertIn("Real estate", kinds["stock"])
+        self.assertIn("Metals", kinds["commodity"])
+        self.assertIn("Energy commodities", kinds["commodity"])
+        self.assertIn("Agriculture", kinds["commodity"])
+        self.assertIn("Livestock", kinds["commodity"])
+        both = markets.pick(markets.ids_of(), futures=False)
+        self.assertIn("TSLA", both)
+        self.assertIn("GLD", both)
+        self.assertIn("USO", both)
+        self.assertIn("CORN", both)
+        self.assertNotIn("GC=F", both)
+        with_futures = markets.pick(["metals", "energy-commodity", "agriculture"], futures=True)
+        self.assertIn("GC=F", with_futures)
+        self.assertIn("CL=F", with_futures)
+        self.assertIn("ZC=F", with_futures)
+        self.assertEqual(markets.mt5_map(["metals", "energy-commodity"]),
+                         {"GC=F": "XAUUSD", "SI=F": "XAGUSD", "PL=F": "XPTUSD", "PA=F": "XPDUSD", "HG=F": "XCUUSD",
+                          "CL=F": "USOIL", "BZ=F": "UKOIL", "NG=F": "NATGAS"})
+        self.assertEqual(len(both), len(set(both)))
+
+    def test_the_window_lists_the_groups(self):
+        g = load("trader-bot", "gui")
+        if g.tk is None or not os.environ.get("DISPLAY") and sys.platform != "win32":
+            self.skipTest("no Tk or no display")
+        d = tempfile.mkdtemp(prefix="bot-mkt-")
+        try:
+            root = g.tk.Tk()
+        except g.tk.TclError as e:
+            shutil.rmtree(d, ignore_errors=True)
+            self.skipTest("Tk cannot open a window here: %s" % e)
+        try:
+            root.withdraw()
+            app = g.App(root, home=d)
+            self.assertGreaterEqual(app.market_list.size(), 16)
+            app.broker_var.set("alpaca")
+            app.apply_markets(["discretionary", "metals"])
+            self.assertIn("TSLA", app.symbols_var.get())
+            self.assertIn("GLD", app.symbols_var.get())
+            self.assertNotIn("GC=F", app.symbols_var.get())
+        finally:
+            root.destroy()
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class Desk(unittest.TestCase):

@@ -35,9 +35,10 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
-VERSION = "2.4.0"
+VERSION = "2.4.1"
 
 # Frozen (the Windows build made by installer/DayTraderBot.spec): the pack's
 # folders are bundled under <bundle>/pack, and the exe itself is the Python
@@ -262,7 +263,8 @@ def parse_chart(doc):
 
 
 def fetch_chart(symbol, interval="5m"):
-    req = urllib.request.Request(CHART_URL % (symbol, interval),
+    yahoo = symbol.upper().replace(".", "-")
+    req = urllib.request.Request(CHART_URL % (urllib.parse.quote(yahoo, safe=""), interval),
                                  headers={"User-Agent": UA, "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
