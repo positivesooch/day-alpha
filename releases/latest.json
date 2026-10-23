@@ -1,12 +1,12 @@
 {
   "name": "Day Trader Bot",
-  "version": "2.4.5",
+  "version": "2.4.6",
   "published": "2026-10-23",
   "installer": {
-    "url": "https://github.com/positivesooch/day-alpha/releases/download/v2.4.5/DayTraderBot-Setup-2.4.5.exe",
-    "file": "DayTraderBot-Setup-2.4.5.exe",
-    "sha256": "4223b40a3ef2aafb1d765e50498df32bf32d3d9cb53ac224521ec6dc80b3b303",
-    "size": 18608368
+    "url": "https://github.com/positivesooch/day-alpha/releases/download/v2.4.6/DayTraderBot-Setup-2.4.6.exe",
+    "file": "DayTraderBot-Setup-2.4.6.exe",
+    "sha256": "c930dd4faaa38a4fce98e25e354cf3ecf846e4aef559d9040d627c0a426087d9",
+    "size": 18619370
   },
-  "notes": "- Update stays on this copy. Check for updates, then \"Update to ...\", replaces\n  the files already installed and opens the window again on the new version.\n  Settings in the DayTraderBot folder stay. A new setup file is only for a PC\n  that has never had the app. FLATTEN ALL still closes everything."
+  "notes": "- Trade history. The Trade tab lists live positions and every closed trade,\n  with profit or loss on each row and a realised total. It keeps reading the\n  session while the bot runs. FLATTEN ALL still closes everything."
 }
