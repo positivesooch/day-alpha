@@ -16,7 +16,10 @@ The app reads the manifest from `update.url` in trader/bot.json (an https
 URL, a file path, or a network share; the installer's url may be relative to
 it), compares the version with its own, and on one click downloads the new
 version, checks its SHA-256 and size, and replaces the files in the same
-folder. The window comes back on the new version. Settings stay. Nothing is
+folder. A blank address, a value that is only slashes (`//`), or a Windows
+path that is not there uses the GitHub release list. The downloaded setup is
+run from a small .cmd so Windows applies that file instead of searching for
+`//`. The window comes back on the new version. Settings stay. Nothing is
 downloaded or run without that click.
 
     python3 bot.py update --check            # is there a newer version?
@@ -85,13 +88,38 @@ def settings(home):
     if env:
         user = dict(user, url=env)
     out.update({k: v for k, v in user.items() if v is not None})
-    if out.get("url") in LEGACY_URLS:
-        out["url"] = DEFAULT_URL
+    out["url"] = online_url(out.get("url"))
     return out
 
 
 def is_url(text):
     return bool(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", text or ""))
+
+
+_ONLY_SLASHES = re.compile(r"^[\\/]+$")
+# \\server\share or //server/share. A lone // is not a share.
+_UNC = re.compile(r"^[\\/]{2}[^\\/]+[\\/][^\\/]+")
+
+
+def online_url(url):
+    """The release list to read. https stays. A real UNC share stays. A local
+    file stays only when it is there. //, a blank, the old unused repo, and a
+    Windows path that is not on this PC all mean the GitHub release list."""
+    text = ("" if url is None else str(url)).strip()
+    if not text or text in LEGACY_URLS or _ONLY_SLASHES.match(text):
+        return DEFAULT_URL
+    low = text.lower()
+    if low.startswith("http://") or low.startswith("https://") or low.startswith("file:"):
+        return text
+    if _UNC.match(text):
+        return text
+    if os.path.exists(text):
+        return text
+    return DEFAULT_URL
+
+
+def _cmd_quote(path):
+    return '"%s"' % str(path).replace('"', "")
 
 
 def read_bytes(location, limit=None, progress=None):
@@ -204,21 +232,38 @@ def download(manifest, dest_dir=None, progress=None):
 
 
 def installer_args(path, relaunch=None, directory=None):
-    """The command that updates the copy already installed. /DIR keeps that folder.
-    The chain runs in its own console so it outlives the caller."""
+    """The silent setup switches. /DIR keeps the folder already installed.
+    A relaunch is not put on this command line: cmd quoting around `start`
+    made Windows search for a file named // instead of running the download."""
     setup = [path, "/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES", "/CLOSEAPPLICATIONS"]
     if directory:
         setup.append("/DIR=%s" % directory)
-    if not relaunch:
-        return setup, False
-    flags = []
-    for arg in setup[1:]:
-        if arg.startswith("/DIR="):
-            flags.append('/DIR="%s"' % arg[len("/DIR="):])
-        else:
-            flags.append(arg)
-    line = 'start "" /wait "%s" %s && start "" "%s"' % (path, " ".join(flags), relaunch)
-    return ["cmd", "/c", line], True
+    if relaunch:
+        return ["cmd", "/c", "call"], True
+    return setup, False
+
+
+def installer_script(path, relaunch=None, directory=None):
+    """CRLF batch that runs the downloaded installer, then opens the app.
+
+    The setup exe is called directly, so /DIR= is an Inno switch. `start` is
+    only the relaunch, with a title and no switches after the exe.
+    """
+    setup = "%s /VERYSILENT /NORESTART /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS" % _cmd_quote(path)
+    if directory:
+        setup += " /DIR=%s" % _cmd_quote(directory)
+    lines = ["@echo off", "ping -n 3 127.0.0.1 >nul", setup]
+    if relaunch:
+        quoted = _cmd_quote(relaunch)
+        lines.append("if exist %s start \"\" %s" % (quoted, quoted))
+    lines.append('del "%~f0"')
+    return "\r\n".join(lines) + "\r\n"
+
+
+def launch_args(script_path):
+    """Run a .cmd by path. `call` keeps the path one argument, so a space in
+    the temp folder cannot be read as a Windows search for //."""
+    return ["cmd", "/c", "call", script_path]
 
 
 def install(path, relaunch=None, directory=None):
@@ -227,7 +272,18 @@ def install(path, relaunch=None, directory=None):
         raise UpdateError("the installer is a Windows program; on this system run it yourself: %s" % path)
     if directory is None and getattr(sys, "frozen", False):
         directory = os.path.dirname(sys.executable)
-    args, via_cmd = installer_args(path, relaunch, directory)
+    if relaunch:
+        folder = os.path.dirname(os.path.abspath(path)) or tempfile.gettempdir()
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError:
+            folder = tempfile.gettempdir()
+        script_path = os.path.join(folder, "apply-update.cmd")
+        with open(script_path, "wb") as fh:
+            fh.write(installer_script(path, relaunch, directory).encode("utf-8"))
+        args = launch_args(script_path)
+    else:
+        args, _via = installer_args(path, None, directory)
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     subprocess.Popen(args, creationflags=flags, close_fds=True)
     return args

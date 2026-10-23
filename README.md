@@ -353,6 +353,8 @@ https URL (the default is
 `https://github.com/positivesooch/day-alpha/releases/latest/download/latest.json`,
 where each release publishes `latest.json` next to the installer), or a
 folder or network share for a team that distributes the installer itself.
+A blank address, a value that is only slashes (`//`), or a Windows path
+that is not on this PC uses that GitHub release list.
 A push to `main` on that GitHub repository builds the installer again and
 replaces the release files, so the download is the newest build. The in-app
 button offers it when the version number goes up (the workflow raises the

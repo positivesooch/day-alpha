@@ -1179,18 +1179,31 @@ class Updates(unittest.TestCase):
         self.assertFalse(updater.check(os.path.join(self.d, "latest.json"), "10.0.0")["available"])
 
     def test_the_installer_command_is_silent_and_relaunches(self):
+        import subprocess
         args, via_cmd = updater.installer_args(r"C:\t\Setup.exe")
         self.assertEqual(args[:3], [r"C:\t\Setup.exe", "/VERYSILENT", "/NORESTART"])
         self.assertIn("/CLOSEAPPLICATIONS", args)
         self.assertNotIn("/DIR=", " ".join(args))
         self.assertFalse(via_cmd)
-        args, via_cmd = updater.installer_args(
+        script = updater.installer_script(
             r"C:\t\Setup.exe", relaunch=r"C:\App\DayTraderBot.exe",
             directory=r"C:\Program Files\Day Trader Bot")
-        self.assertEqual(args[:2], ["cmd", "/c"])
-        self.assertIn('start "" /wait "C:\\t\\Setup.exe" /VERYSILENT', args[2])
-        self.assertIn('/DIR="C:\\Program Files\\Day Trader Bot"', args[2])
-        self.assertTrue(args[2].endswith('&& start "" "C:\\App\\DayTraderBot.exe"'))
+        self.assertIn("\r\n", script)
+        setup = [ln for ln in script.splitlines() if "Setup.exe" in ln][0]
+        self.assertIn('"C:\\t\\Setup.exe"', setup)
+        self.assertIn("/VERYSILENT", setup)
+        self.assertIn("/NORESTART", setup)
+        self.assertIn("/CLOSEAPPLICATIONS", setup)
+        self.assertIn('/DIR="C:\\Program Files\\Day Trader Bot"', setup)
+        self.assertNotIn("start", setup)
+        relaunch = [ln for ln in script.splitlines() if "DayTraderBot.exe" in ln][0]
+        self.assertEqual(relaunch, 'if exist "C:\\App\\DayTraderBot.exe" start "" "C:\\App\\DayTraderBot.exe"')
+        self.assertNotIn("/wait", script)
+        self.assertNotIn("&&", script)
+        self.assertNotIn("/DIR", relaunch)
+        line = subprocess.list2cmdline(updater.launch_args(r"C:\Users\A B\Temp\apply-update.cmd"))
+        self.assertEqual(line, 'cmd /c call "C:\\Users\\A B\\Temp\\apply-update.cmd"')
+        self.assertNotIn("start", line)
         if sys.platform != "win32":
             with self.assertRaises(updater.UpdateError):
                 updater.install(self.exe)
@@ -1213,6 +1226,19 @@ class Updates(unittest.TestCase):
             json.dump({"update": {"url": updater.LEGACY_URLS[0]}}, fh)
         self.assertEqual(updater.settings(self.d)["url"], updater.DEFAULT_URL)
         self.assertIn("positivesooch/day-alpha", updater.DEFAULT_URL)
+        for bad in ("//", "\\\\", "/", "\\", "///", "   ", r"C:\no\such\latest.json"):
+            with open(os.path.join(self.d, "trader", "bot.json"), "w") as fh:
+                json.dump({"update": {"url": bad}}, fh)
+            self.assertEqual(updater.settings(self.d)["url"], updater.DEFAULT_URL, bad)
+        with open(os.path.join(self.d, "trader", "bot.json"), "w") as fh:
+            json.dump({"update": {"url": "//nas/share/latest.json"}}, fh)
+        self.assertEqual(updater.settings(self.d)["url"], "//nas/share/latest.json")
+        here = os.path.join(self.d, "latest.json")
+        with open(here, "w") as fh:
+            fh.write("{}")
+        with open(os.path.join(self.d, "trader", "bot.json"), "w") as fh:
+            json.dump({"update": {"url": here}}, fh)
+        self.assertEqual(updater.settings(self.d)["url"], here)
 
     def test_the_cli_checks_downloads_and_stops_short_of_running_on_a_no(self):
         updater.write_manifest(self.exe, "9.9.0", notes="Big news.")
@@ -1258,6 +1284,9 @@ class Updates(unittest.TestCase):
             app_id = re.search(r"AppId=\{\{([0-9A-F-]+)\}", fh.read()).group(1)
         self.assertIn("{%s}_is1" % app_id, text)
         self.assertIn(updater.DEFAULT_URL, text)
+        self.assertIn("Use-OnlineUrl", text)
+        self.assertIn("^[\\\\/]+$", text)
+        self.assertIn("yoyossm/day-alpha", text)
         pwsh = shutil.which("pwsh") or shutil.which("powershell") or (
             "/home/ubuntu/pwsh/pwsh" if os.path.exists("/home/ubuntu/pwsh/pwsh") else None)
         if not pwsh:

@@ -76,9 +76,20 @@ function Get-File($loc, $dest) {
 }
 
 function Resolve-Loc($base, $ref) {
+    if ($ref -match '^[\\/]+$') { return $ref }
     if ($ref -match '^https?://' -or $ref -match '^[A-Za-z]:[\\/]' -or $ref.StartsWith('\\') -or $ref.StartsWith('/')) { return $ref }
     if ($base -match '^https?://') { return ([Uri]::new([Uri]$base, $ref)).AbsoluteUri }
     return Join-Path (Split-Path -Parent (Resolve-Path -LiteralPath $base)) $ref
+}
+
+function Use-OnlineUrl([string]$candidate) {
+    if (-not $candidate) { return $false }
+    $t = $candidate.Trim()
+    if (-not $t -or $t -match '^[\\/]+$') { return $false }
+    if ($t -match '^https?://' -or $t -match '^file:') { return $true }
+    if ($t -match '^[\\/]{2}[^\\/]+[\\/][^\\/]+') { return $true }
+    if (Test-Path -LiteralPath $t) { return $true }
+    return $false
 }
 
 function As-Version($text) { return [version](($text -replace '^v', '') -replace '[^0-9.].*$', '') }
@@ -92,7 +103,8 @@ try {
             try { $j = Get-Content -Raw -LiteralPath $cfg | ConvertFrom-Json; if ($j.update.url) { $Url = [string]$j.update.url } } catch {}
         }
     }
-    if (-not $Url) { $Url = $DefaultUrl }
+    if (-not (Use-OnlineUrl $Url)) { $Url = $DefaultUrl }
+    if ($Url -eq 'https://github.com/yoyossm/day-alpha/releases/latest/download/latest.json') { $Url = $DefaultUrl }
 
     $m = Get-Text $Url | ConvertFrom-Json
     if (-not $m.version -or -not $m.installer -or -not $m.installer.url) { throw "the release list at $Url has no version and installer url" }
@@ -113,6 +125,7 @@ try {
     }
 
     $loc = Resolve-Loc $Url ([string]$m.installer.url)
+    if ($loc -match '^[\\/]+$') { throw "the release list names a Windows path ($loc). Updates download from the GitHub release, not a local file." }
     $name = if ($m.installer.file) { [string]$m.installer.file } else { Split-Path -Leaf ($loc -replace '[?#].*$', '') }
     if ($name -notmatch '^[\w.-]+\.exe$') { throw "the release list names an installer that is not an .exe: $name" }
     $tmp = if ($env:TEMP) { $env:TEMP } else { [IO.Path]::GetTempPath() }

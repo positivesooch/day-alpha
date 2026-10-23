@@ -4,6 +4,14 @@ The installed app reads the newest entry's notes from `releases/latest.json`
 and shows them next to its "Update to ..." button. Keep the newest version at
 the top, one `## <version> (<date>)` heading per release.
 
+## 2.4.7 (2026-10-23)
+
+- Check for updates downloads the installer from the GitHub release at
+  https://github.com/positivesooch/day-alpha. A blank update address, a
+  value that is only slashes, or a Windows path that is not on this PC
+  uses that release list. The downloaded setup runs as that file. FLATTEN ALL
+  still closes everything.
+
 ## 2.4.6 (2026-10-23)
 
 - Trade history. The Trade tab lists live positions and every closed trade,
