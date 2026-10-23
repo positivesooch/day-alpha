@@ -1139,6 +1139,7 @@ class Updates(unittest.TestCase):
 
     def test_settings_come_from_bot_json_and_the_environment(self):
         os.makedirs(os.path.join(self.d, "trader"))
+        os.environ.pop("DAYTRADERBOT_UPDATE_URL", None)
         self.assertEqual(updater.settings(self.d), updater.DEFAULTS)
         with open(os.path.join(self.d, "trader", "bot.json"), "w") as fh:
             json.dump({"update": {"url": r"\\nas\share\latest.json", "check_on_start": False}}, fh)
