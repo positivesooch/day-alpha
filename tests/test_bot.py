@@ -541,7 +541,10 @@ class Window(unittest.TestCase):
             self.assertEqual(app.symbols_var.get(), "TSLA")
             self.assertEqual(app.mode_var.get(), "dry-run")
             self.assertIn("no config yet", app.account_var.get())
-            self.assertEqual(app.book.tab(app.book.tabs()[1], "text"), "Trade")
+            self.assertEqual([app.book.tab(t, "text") for t in app.book.tabs()],
+                             ["Bot", "Market", "Trade", "Broker", "Settings"])
+            self.assertTrue(app.tape_on.get())
+            self.assertEqual(app.chart_symbol.get(), "TSLA")
             self.assertEqual(str(app.btn_flatten.cget("text")), "FLATTEN ALL")
             self.assertEqual(str(app.btn_connect.cget("text")), "Connect")
             self.assertEqual(str(app.btn_live_auto.cget("text")), "Run live, auto")
@@ -1414,6 +1417,121 @@ class Desk(unittest.TestCase):
         code, out, err = run(["creds", "--dir", self.d, "--clear", "alpaca.key"])
         self.assertEqual(code, 0, err)
         self.assertIsNone(v.get("alpaca.key"))
+
+
+class LiveChart(unittest.TestCase):
+    """The Market tab: a Yahoo quote, candle geometry, and a drawn chart that follows the symbol box."""
+
+    def test_a_yahoo_chart_becomes_a_quote(self):
+        import tape
+        with open(BARS) as fh:
+            snap = tape.snapshot(json.load(fh))
+        self.assertEqual(snap["symbol"], "TSLA")
+        self.assertEqual(snap["price"], 366.07)
+        self.assertAlmostEqual(snap["prev_close"], 354.72)
+        self.assertAlmostEqual(snap["change"], 366.07 - 354.72, places=2)
+        self.assertGreater(snap["change_pct"], 3)
+        self.assertGreater(len(snap["bars"]), 10)
+        self.assertEqual(snap["asof"], datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=1792421385))
+        text = tape.headline(snap)
+        self.assertIn("TSLA", text)
+        self.assertIn("366.07", text)
+        self.assertIn("+", text)
+        self.assertIn("ET", text)
+        self.assertEqual(tape.SPANS["1m"], "1d")
+        self.assertEqual(tape.SPANS["15m"], "5d")
+        self.assertEqual(tape.SPANS["1h"], "1mo")
+        self.assertEqual(tape.split_symbols("tsla, AAPL, tsla, GLD, uso", limit=3), ["TSLA", "AAPL", "GLD"])
+
+    def test_the_trading_chart_url_stays_one_regular_session(self):
+        self.assertEqual(
+            bot.chart_request_url("BRK.B"),
+            "https://query2.finance.yahoo.com/v8/finance/chart/BRK-B?range=1d&interval=5m&includePrePost=false")
+        live = bot.chart_request_url("GC=F", "15m", "5d", True)
+        self.assertIn("range=5d", live)
+        self.assertIn("interval=15m", live)
+        self.assertIn("includePrePost=true", live)
+
+    def test_candles_rise_on_the_screen_when_price_rises(self):
+        import tape
+        bars = [
+            {"t": datetime.datetime(2026, 10, 19, 14, 0), "o": 10, "h": 11, "l": 9, "c": 10.5, "v": 1},
+            {"t": datetime.datetime(2026, 10, 19, 14, 5), "o": 10.5, "h": 12, "l": 10, "c": 11.5, "v": 1},
+        ]
+        laid = tape.layout(bars, 400, 200)
+        self.assertEqual(len(laid["candles"]), 2)
+        self.assertLess(laid["candles"][1]["close"], laid["candles"][0]["close"])
+        self.assertTrue(laid["candles"][1]["up"])
+        self.assertTrue(laid["candles"][0]["up"])
+        marks = tape.layout(bars, 400, 200, levels={"entry": 10.5, "stop": 9.2, "target": 12})
+        self.assertEqual([m["name"] for m in marks["marks"]], ["entry", "stop", "target"])
+        self.assertGreater(marks["marks"][1]["y"], marks["marks"][0]["y"])  # a lower stop sits further down
+        self.assertEqual(tape.layout([], 400, 200)["candles"], [])
+
+    def test_load_asks_yahoo_for_the_span_that_fits_the_candle(self):
+        import tape
+        self.assertIs(tape.bot, bot)
+        seen = []
+
+        def fake(symbol, interval="5m", span="1d", prepost=False):
+            seen.append((symbol, interval, span, prepost))
+            with open(BARS) as fh:
+                return json.load(fh)
+
+        old = bot.fetch_chart
+        bot.fetch_chart = fake
+        try:
+            snap = tape.load("tsla", "1m")
+        finally:
+            bot.fetch_chart = old
+        self.assertEqual(seen, [("tsla", "1m", "1d", True)])
+        self.assertEqual(snap["symbol"], "TSLA")
+        self.assertEqual(snap["interval"], "1m")
+        self.assertEqual(tape.levels_for("TSLA", [{"symbol": "TSLA", "entry": 364.18, "stop": 358.32,
+                                                   "target": 370.04, "mark": 366.1}]),
+                         {"entry": 364.18, "stop": 358.32, "target": 370.04, "mark": 366.1})
+        self.assertEqual(tape.levels_for("AAPL", [{"symbol": "TSLA", "entry": 1}]), {})
+
+    def test_the_market_tab_draws_the_fixture_and_follows_a_symbol_change(self):
+        g = load("trader-bot", "gui")
+        import tape
+        if g.tk is None or not os.environ.get("DISPLAY") and sys.platform != "win32":
+            self.skipTest("no Tk or no display")
+        d = tempfile.mkdtemp(prefix="bot-chart-")
+        try:
+            root = g.tk.Tk()
+        except g.tk.TclError as e:
+            shutil.rmtree(d, ignore_errors=True)
+            self.skipTest("Tk cannot open a window here: %s" % e)
+        try:
+            root.withdraw()
+            app = g.App(root, home=d)
+            app.tape_on.set(False)
+            with open(BARS) as fh:
+                snap = tape.snapshot(json.load(fh))
+            snap["interval"] = "5m"
+            app._tape_snap = snap
+            app.account_doc = {"positions": [{"symbol": "TSLA", "entry": 364.18, "stop": 358.32,
+                                              "target": 370.04, "mark": 366.07}]}
+            app.chart.configure(width=640, height=300)
+            app.quote_var.set(tape.headline(snap))
+            app._draw_chart(snap)
+            self.assertGreater(len(app.chart.find_all()), 8)
+            self.assertIn("366.07", app.quote_var.get())
+            texts = [app.chart.itemcget(i, "text") for i in app.chart.find_all() if app.chart.type(i) == "text"]
+            self.assertTrue(any(t.startswith("entry ") for t in texts), texts)
+            app._fill_tape([snap, {"symbol": "AAPL", "error": "HTTP 404"}])
+            self.assertEqual(len(app.tape_list.get_children()), 2)
+            app.symbols_var.set("GLD,USO")
+            self.assertEqual(app.chart_symbol.get(), "GLD")
+            self.assertIn("GLD", app.chart_symbol_box.cget("values"))
+            # the edit only schedules a refresh; nothing is fetched until the event loop runs
+            self.assertIsNotNone(app._tape_job)
+        finally:
+            if "app" in locals():
+                app._closing = True
+            root.destroy()
+            shutil.rmtree(d, ignore_errors=True)
 
 
 if __name__ == "__main__":

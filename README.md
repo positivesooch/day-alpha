@@ -206,6 +206,17 @@ broad baskets). Alpaca trades the stocks and the commodity ETFs (`GLD`,
 common stocks" downloads Nasdaq Trader's common-stock list and lets the
 scanner look through it. The loss limits still cap how many trades a day.
 
+**Live chart.** The Market tab polls Yahoo Finance (the same unofficial
+feed the sim uses for today's bars) and draws candles for the symbol you
+are watching. Pick 1-minute, 5-minute, 15-minute or 1-hour candles. Live
+is on by default and refreshes every 15 seconds; turn it off or press
+Refresh for one pull. The tape under the chart shows the last price and
+the day's change for up to eight symbols from the Bot tab. Editing those
+symbols, choosing a stock type or commodity, or typing a symbol on the
+Trade tab moves the chart. After Connect, an open position's entry, stop,
+target and mark are drawn across the candles. The chart does not place
+orders.
+
 **Three brokers.** `sim` is a paper broker inside the bot that fills at the
 latest price and walks the bracket bar by bar (when one bar touches both the
 stop and the target, the stop wins). `alpaca` talks to Alpaca's REST API with

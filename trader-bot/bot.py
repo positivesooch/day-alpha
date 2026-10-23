@@ -38,7 +38,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.4.1"
+VERSION = "2.4.2"
 
 # Frozen (the Windows build made by installer/DayTraderBot.spec): the pack's
 # folders are bundled under <bundle>/pack, and the exe itself is the Python
@@ -82,7 +82,8 @@ def default_home():
     return os.path.abspath(".")
 
 UA = "day-trader-skill/2.0 (trader-bot; python-urllib)"
-CHART_URL = "https://query2.finance.yahoo.com/v8/finance/chart/%s?range=1d&interval=%s&includePrePost=false"
+CHART_URL = ("https://query2.finance.yahoo.com/v8/finance/chart/%s"
+             "?range=%s&interval=%s&includePrePost=%s")
 ALPACA_PAPER = "https://paper-api.alpaca.markets"
 ALPACA_LIVE = "https://api.alpaca.markets"
 ALPACA_DATA = "https://data.alpaca.markets"
@@ -262,9 +263,14 @@ def parse_chart(doc):
     return {"symbol": (meta.get("symbol") or "").upper(), "bars": bars, "meta": meta}
 
 
-def fetch_chart(symbol, interval="5m"):
+def chart_request_url(symbol, interval="5m", span="1d", prepost=False):
+    """Yahoo v8 chart URL. The bot's own bars stay on the regular session (prepost off, one day)."""
     yahoo = symbol.upper().replace(".", "-")
-    req = urllib.request.Request(CHART_URL % (urllib.parse.quote(yahoo, safe=""), interval),
+    return CHART_URL % (urllib.parse.quote(yahoo, safe=""), span, interval, "true" if prepost else "false")
+
+
+def fetch_chart(symbol, interval="5m", span="1d", prepost=False):
+    req = urllib.request.Request(chart_request_url(symbol, interval, span, prepost),
                                  headers={"User-Agent": UA, "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=20) as r:

@@ -4,6 +4,16 @@ The installed app reads the newest entry's notes from `releases/latest.json`
 and shows them next to its "Update to ..." button. Keep the newest version at
 the top, one `## <version> (<date>)` heading per release.
 
+## 2.4.2 (2026-10-23)
+
+- Live market chart. The Market tab draws today's candles (1 minute, 5
+  minute, 15 minute, or 1 hour) and a last-price tape from Yahoo Finance,
+  the same feed the sim trades on. Live refreshes every 5, 15, 30 or 60
+  seconds. Changing the symbol box, a market-list button, or the Trade
+  tab's symbol moves the chart onto that name. Connect draws the open
+  position's entry, stop, target and mark on the candles. FLATTEN ALL
+  still closes everything.
+
 ## 2.4.1 (2026-10-23)
 
 - Stocks and commodities. The Bot tab lists every stock type (index ETFs,

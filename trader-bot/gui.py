@@ -37,6 +37,7 @@ PACK_BOT = os.path.join(BUNDLE, "pack", "trader-bot") if FROZEN else HERE
 sys.path.insert(0, PACK_BOT)
 import bot  # noqa: E402  (the same module the console runs)
 import markets  # noqa: E402  (stock sectors and commodities)
+import tape  # noqa: E402  (live quotes and the candle layout)
 import update as updater  # noqa: E402
 
 VERSION = bot.VERSION
@@ -191,10 +192,16 @@ class App(object):
         root.protocol("WM_DELETE_WINDOW", self.close)
         self.desk_busy = False
         self.account_doc = None
+        self._tape_job = None
+        self._tape_gen = 0
+        self._tape_snap = None
+        self._closing = False
         self._build()
         self._refresh_header()
         self.append("Day Trader Bot %s. Education and tooling, not financial advice. Most people who day trade "
-                    "lose money.\nData folder: %s\n\nBot: replay a recorded day, or run today. Trade: connect, "
+                    "lose money.\nData folder: %s\n\nMarket: a live candle chart and last prices from Yahoo "
+                    "Finance. It follows the symbols you type or pick, and draws the entry, stop and target "
+                    "of a position after Connect. Bot: replay a recorded day, or run today. Trade: connect, "
                     "see the account, place one bracket order, close a position. FLATTEN ALL closes everything "
                     "and stops new entries for the day. Broker: Alpaca keys or a MetaTrader 5 login. Settings: "
                     "your limits, and the switch from paper to a live account (that switch asks you to type "
@@ -238,10 +245,12 @@ class App(object):
         self.book = ttk.Notebook(r)
         self.book.pack(fill="both", expand=True, padx=8, pady=4)
         bot_tab = ttk.Frame(self.book)
+        market_tab = ttk.Frame(self.book)
         trade_tab = ttk.Frame(self.book)
         broker_tab = ttk.Frame(self.book)
         settings_tab = ttk.Frame(self.book)
         self.book.add(bot_tab, text="Bot")
+        self.book.add(market_tab, text="Market")
         self.book.add(trade_tab, text="Trade")
         self.book.add(broker_tab, text="Broker")
         self.book.add(settings_tab, text="Settings")
@@ -285,6 +294,7 @@ class App(object):
         ttk.Button(bar, text="Settings folder", command=self.open_settings).pack(side="right")
         ttk.Button(bar, text="Clear log", command=self.clear).pack(side="right", padx=(0, 6))
         self._build_markets(bot_tab)
+        self._build_market(market_tab)
         self._build_trade(trade_tab)
         self._build_broker(broker_tab)
         self._build_settings(settings_tab)
@@ -386,6 +396,241 @@ class App(object):
             self.root.after(0, finish)
         threading.Thread(target=work, daemon=True).start()
 
+    def _build_market(self, tab):
+        """Live candles and a last-price tape. Yahoo is polled; the chart follows symbol edits."""
+        top = ttk.Frame(tab)
+        top.pack(fill="x", padx=8, pady=6)
+        ttk.Label(top, text="Symbol").pack(side="left")
+        self.chart_symbol = tk.StringVar(value=self._first_symbol())
+        self.chart_symbol_box = ttk.Combobox(top, textvariable=self.chart_symbol, width=12)
+        self.chart_symbol_box.pack(side="left", padx=6)
+        self.chart_symbol_box.bind("<<ComboboxSelected>>", lambda e: self.refresh_tape(now=True))
+        ttk.Label(top, text="Candles").pack(side="left")
+        self.chart_interval = tk.StringVar(value="5m")
+        interval = ttk.Combobox(top, textvariable=self.chart_interval, values=tape.INTERVALS,
+                                state="readonly", width=6)
+        interval.pack(side="left", padx=6)
+        interval.bind("<<ComboboxSelected>>", lambda e: self.refresh_tape(now=True))
+        self.tape_on = tk.BooleanVar(value=True)
+        ttk.Checkbutton(top, text="Live", variable=self.tape_on, command=self._tape_arm).pack(side="left", padx=6)
+        ttk.Label(top, text="every").pack(side="left")
+        self.tape_every = tk.StringVar(value="15")
+        every = ttk.Combobox(top, textvariable=self.tape_every, values=("5", "15", "30", "60"),
+                             state="readonly", width=4)
+        every.pack(side="left", padx=4)
+        ttk.Label(top, text="s").pack(side="left")
+        every.bind("<<ComboboxSelected>>", lambda e: self._tape_arm())
+        ttk.Button(top, text="Refresh", command=lambda: self.refresh_tape(now=True)).pack(side="left", padx=8)
+        self.quote_var = tk.StringVar(value="Live prices load from Yahoo Finance, the same feed the sim trades on.")
+        ttk.Label(tab, textvariable=self.quote_var, wraplength=920).pack(anchor="w", padx=8)
+        self.chart = tk.Canvas(tab, height=300, background="#f4f6f8", highlightthickness=0)
+        self.chart.pack(fill="both", expand=True, padx=8, pady=4)
+        self.chart.bind("<Configure>", lambda e: self._draw_chart(self._tape_snap) if self._tape_snap else None)
+        cols = ("symbol", "last", "change", "state")
+        self.tape_list = ttk.Treeview(tab, columns=cols, show="headings", height=5)
+        for name, heading, width in (("symbol", "Symbol", 110), ("last", "Last", 110),
+                                     ("change", "Change", 180), ("state", "Session", 120)):
+            self.tape_list.heading(name, text=heading)
+            self.tape_list.column(name, width=width, anchor="w")
+        self.tape_list.pack(fill="x", padx=8, pady=(0, 6))
+        self.tape_list.bind("<<TreeviewSelect>>", self._tape_picked)
+        self._sync_chart_symbols()
+        self.symbols_var.trace_add("write", lambda *a: self._symbols_edited())
+        self.root.after(700, self._tape_arm)
+
+    def _first_symbol(self):
+        syms = tape.split_symbols(self.symbols_var.get(), limit=1)
+        return syms[0] if syms else "TSLA"
+
+    def _sync_chart_symbols(self):
+        syms = tape.split_symbols(self.symbols_var.get(), limit=8)
+        current = self.chart_symbol.get().strip().upper()
+        if current and current not in syms:
+            syms = [current] + syms
+        if not syms:
+            syms = ["TSLA"]
+        self.chart_symbol_box.configure(values=tuple(syms[:8]))
+
+    def _symbols_edited(self):
+        """A change in the symbol box (typed, or a market-list button) moves the chart onto that list."""
+        syms = tape.split_symbols(self.symbols_var.get(), limit=8)
+        self.chart_symbol_box.configure(values=tuple(syms or ("TSLA",)))
+        if syms and self.chart_symbol.get().strip().upper() not in syms:
+            self.chart_symbol.set(syms[0])
+        self._tape_soon()
+
+    def _trade_symbol_edited(self):
+        sym = self.trade_symbol.get().strip().upper()
+        if not sym or sym == self.chart_symbol.get().strip().upper():
+            return
+        self.chart_symbol.set(sym)
+        self._sync_chart_symbols()
+        self._tape_soon()
+
+    def _tape_soon(self):
+        """Wait a beat so typing a symbol does not fire a request per keystroke."""
+        if self._closing:
+            return
+        if self._tape_job is not None:
+            try:
+                self.root.after_cancel(self._tape_job)
+            except tk.TclError:
+                pass
+            self._tape_job = None
+        self._tape_job = self.root.after(400, lambda: self.refresh_tape(now=True))
+
+    def _tape_arm(self):
+        if self.tape_on.get():
+            self.refresh_tape(now=True)
+        elif self._tape_job is not None:
+            try:
+                self.root.after_cancel(self._tape_job)
+            except tk.TclError:
+                pass
+            self._tape_job = None
+
+    def _tape_picked(self, event=None):
+        sel = self.tape_list.selection()
+        if not sel:
+            return
+        values = self.tape_list.item(sel[0], "values")
+        if not values:
+            return
+        sym = str(values[0]).strip().upper()
+        if sym and sym != self.chart_symbol.get().strip().upper():
+            self.chart_symbol.set(sym)
+            self.refresh_tape(now=True)
+
+    def refresh_tape(self, now=False):
+        """Pull the chart symbol and up to seven watched names. `now` ignores the Live checkbox."""
+        if self._closing:
+            return
+        if self._tape_job is not None:
+            try:
+                self.root.after_cancel(self._tape_job)
+            except tk.TclError:
+                pass
+            self._tape_job = None
+        if not now and not self.tape_on.get():
+            return
+        symbol = self.chart_symbol.get().strip().upper()
+        if not symbol:
+            self.quote_var.set("Type a symbol to load its chart.")
+            return
+        interval = self.chart_interval.get() or "5m"
+        others = [s for s in tape.split_symbols(self.symbols_var.get(), limit=8) if s != symbol]
+        self._tape_gen += 1
+        gen = self._tape_gen
+        self.quote_var.set("Loading %s (%s) from Yahoo Finance..." % (symbol, interval))
+
+        def work():
+            try:
+                main = tape.load(symbol, interval)
+                rows = [main]
+                for name in others:
+                    try:
+                        rows.append(tape.load(name, "5m"))
+                    except Exception as err:
+                        rows.append({"symbol": name, "error": str(err)})
+                payload = (main, rows, None)
+            except Exception as err:
+                payload = (None, [], err)
+            try:
+                self.root.after(0, lambda: self._tape_show(gen, payload))
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _tape_show(self, gen, payload):
+        if self._closing or gen != self._tape_gen:
+            return
+        try:
+            if not self.root.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        main, rows, err = payload
+        if err is not None:
+            self.quote_var.set("%s: %s" % (self.chart_symbol.get().strip().upper(), err))
+            self._draw_chart(None, error=str(err))
+        else:
+            self._tape_snap = main
+            self.quote_var.set(tape.headline(main) + "    Yahoo Finance")
+            self._draw_chart(main)
+            self._fill_tape(rows)
+        self._tape_later()
+
+    def _tape_later(self):
+        if self._closing or not self.tape_on.get():
+            return
+        try:
+            seconds = int(self.tape_every.get())
+        except (TypeError, ValueError):
+            seconds = 15
+        seconds = min(120, max(5, seconds))
+        self._tape_job = self.root.after(seconds * 1000, lambda: self.refresh_tape(now=True))
+
+    def _fill_tape(self, rows):
+        self.tape_list.delete(*self.tape_list.get_children())
+        for row in rows:
+            if row.get("error"):
+                self.tape_list.insert("", "end", values=(row.get("symbol") or "?", "-", str(row["error"])[:48], ""))
+                continue
+            self.tape_list.insert("", "end", values=(
+                row.get("symbol") or "?", tape.price_text(row.get("price")), tape.change_text(row),
+                tape.state_text(row.get("state"))))
+
+    def _chart_levels(self, symbol):
+        doc = self.account_doc or {}
+        return tape.levels_for(symbol, doc.get("positions"))
+
+    def _draw_chart(self, snap, error=None):
+        canvas = self.chart
+        canvas.delete("all")
+        width = max(int(canvas.winfo_width() or 0), 640)
+        height = max(int(canvas.winfo_height() or 0), 280)
+        if error:
+            canvas.create_text(width / 2, height / 2, text=error, fill="#b00020", width=width - 48)
+            return
+        bars = (snap or {}).get("bars") if snap else None
+        if not bars:
+            canvas.create_text(width / 2, height / 2, text="No candles yet. Pick a symbol and press Refresh.",
+                               fill="#555")
+            return
+        laid = tape.layout(bars, width, height, levels=self._chart_levels(snap.get("symbol")))
+        for lab in laid["labels"]:
+            canvas.create_line(laid["left"], lab["y"], width - laid["right"], lab["y"], fill="#e1e5ea")
+            canvas.create_text(6, lab["y"], anchor="w", text=tape.price_text(lab["price"]), fill="#667",
+                               font=("TkDefaultFont", 8))
+        for candle in laid["candles"]:
+            color = "#1b7f3b" if candle["up"] else "#b00020"
+            canvas.create_line(candle["x"], candle["high"], candle["x"], candle["low"], fill=color)
+            top = min(candle["open"], candle["close"])
+            bottom = max(candle["open"], candle["close"])
+            if bottom - top < 1:
+                bottom = top + 1
+            half = candle["w"] / 2.0
+            canvas.create_rectangle(candle["x"] - half, top, candle["x"] + half, bottom, fill=color, outline=color)
+        colors = {"entry": "#0a58ca", "stop": "#b00020", "target": "#1b7f3b", "mark": "#6b4c9a"}
+        for mark in laid["marks"]:
+            color = colors.get(mark["name"], "#333")
+            canvas.create_line(laid["left"], mark["y"], width - laid["right"], mark["y"], fill=color, dash=(4, 3))
+            canvas.create_text(width - 8, mark["y"], anchor="e",
+                               text="%s %s" % (mark["name"], tape.price_text(mark["price"])), fill=color,
+                               font=("TkDefaultFont", 8))
+        if laid["candles"]:
+            canvas.create_line(laid["left"], laid["last_y"], width - laid["right"], laid["last_y"], fill="#0a58ca")
+            first, last = laid["candles"][0], laid["candles"][-1]
+            if first.get("t"):
+                canvas.create_text(first["x"], height - 8, anchor="w",
+                                   text=bot.to_eastern(first["t"]).strftime("%H:%M"), fill="#555",
+                                   font=("TkDefaultFont", 8))
+            if last.get("t") and last is not first:
+                canvas.create_text(last["x"], height - 8, anchor="e",
+                                   text=bot.to_eastern(last["t"]).strftime("%H:%M"), fill="#555",
+                                   font=("TkDefaultFont", 8))
+
     def _build_trade(self, tab):
         form = ttk.LabelFrame(tab, text="One bracket order (long only). Your limits still size it and can refuse it.")
         form.pack(fill="x", padx=8, pady=6)
@@ -415,6 +660,7 @@ class App(object):
             self.tree.heading(c, text=h)
             self.tree.column(c, width=90, anchor="e" if c != "symbol" else "w")
         self.tree.pack(fill="both", expand=True, padx=8, pady=6)
+        self.trade_symbol.trace_add("write", lambda *a: self._trade_symbol_edited())
         bar = ttk.Frame(tab)
         bar.pack(fill="x", padx=8, pady=(0, 6))
         ttk.Button(bar, text="Close selected", command=self.close_selected).pack(side="left")
@@ -641,6 +887,8 @@ class App(object):
                 "%s%s" % ("+" if pnl >= 0 else "-", _money(abs(pnl))),
                 _money(p.get("stop")) if p.get("stop") else "-",
                 _money(p.get("target")) if p.get("target") else "-"))
+        if self._tape_snap:
+            self._draw_chart(self._tape_snap)
 
     def flatten_all(self):
         account = "PAPER" if self._paper() else "LIVE, real money"
@@ -983,6 +1231,13 @@ class App(object):
         self.root.after(300, self.root.destroy)
 
     def close(self):
+        self._closing = True
+        if self._tape_job is not None:
+            try:
+                self.root.after_cancel(self._tape_job)
+            except tk.TclError:
+                pass
+            self._tape_job = None
         if self.runner and self.runner.alive():
             if not messagebox.askyesno("Quit", "The bot is running. Stop it and quit?"):
                 return

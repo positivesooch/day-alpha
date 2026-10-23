@@ -1,12 +1,12 @@
 {
   "name": "Day Trader Bot",
-  "version": "2.4.1",
+  "version": "2.4.2",
   "published": "2026-10-23",
   "installer": {
-    "url": "DayTraderBot-Setup-2.4.1.exe",
-    "file": "DayTraderBot-Setup-2.4.1.exe",
-    "sha256": "8b9e4a2d63972dc947c0739723f502035cedf0cdcbe2f728c6d7ef2a53664f9f",
-    "size": 18016182
+    "url": "DayTraderBot-Setup-2.4.2.exe",
+    "file": "DayTraderBot-Setup-2.4.2.exe",
+    "sha256": "6e51e7da01267d80940f665015ba9fef739970d421c07c4df743b8fb1ec7cd23",
+    "size": 18050257
   },
-  "notes": "- Stocks and commodities. The Bot tab lists every stock type (index ETFs,\n  technology, communication, consumer discretionary, consumer staples,\n  healthcare, financials, industrials, energy, materials, utilities, real\n  estate) and commodities (metals, energy, agriculture, livestock, baskets).\n  Alpaca watches the stock and the commodity ETF (GLD, USO, CORN). The sim\n  and MetaTrader 5 also watch the futures (GC=F gold as XAUUSD, CL=F oil as\n  USOIL, and the grains, softs, and livestock). All US common stocks turns\n  the scanner onto Nasdaq Trader's list.\n- Run live, auto. One button on the Bot tab arms the live account and starts\n  today's session in auto mode, so the bot places its own orders on Alpaca's\n  live API or the MetaTrader 5 account without a yes for each ticket. It asks\n  once, and it asks you to type TRADE REAL MONEY. The sim broker stays paper\n  only. FLATTEN ALL still closes everything."
+  "notes": "- Live market chart. The Market tab draws today's candles (1 minute, 5\n  minute, 15 minute, or 1 hour) and a last-price tape from Yahoo Finance,\n  the same feed the sim trades on. Live refreshes every 5, 15, 30 or 60\n  seconds. Changing the symbol box, a market-list button, or the Trade\n  tab's symbol moves the chart onto that name. Connect draws the open\n  position's entry, stop, target and mark on the candles. FLATTEN ALL\n  still closes everything."
 }
