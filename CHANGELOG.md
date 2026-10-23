@@ -4,6 +4,12 @@ The installed app reads the newest entry's notes from `releases/latest.json`
 and shows them next to its "Update to ..." button. Keep the newest version at
 the top, one `## <version> (<date>)` heading per release.
 
+## 2.4.6 (2026-10-23)
+
+- Trade history. The Trade tab lists live positions and every closed trade,
+  with profit or loss on each row and a realised total. It keeps reading the
+  session while the bot runs. FLATTEN ALL still closes everything.
+
 ## 2.4.5 (2026-10-23)
 
 - Update stays on this copy. Check for updates, then "Update to ...", replaces

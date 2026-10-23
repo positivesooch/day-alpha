@@ -105,6 +105,97 @@ def _money(value):
         return str(value)
 
 
+def _signed_money(value):
+    if value is None or value == "":
+        return "-"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number > 0:
+        return "+" + _money(number)
+    if number < 0:
+        return "-" + _money(abs(number))
+    return _money(0)
+
+
+def _pnl_result(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "flat"
+    if number > 0:
+        return "profit"
+    if number < 0:
+        return "loss"
+    return "flat"
+
+
+def _position_pnl(pos):
+    if pos.get("pnl") is not None:
+        try:
+            return round(float(pos["pnl"]), 2)
+        except (TypeError, ValueError):
+            return None
+    try:
+        return round((float(pos["mark"]) - float(pos["entry"])) * float(pos["qty"]), 2)
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def _trade_row(symbol, pos, when=""):
+    pnl = _position_pnl(pos)
+    return {"when": when or pos.get("exit_time") or "", "symbol": symbol,
+            "side": pos.get("side") or "long", "qty": pos.get("qty"),
+            "entry": pos.get("entry"), "mark": pos.get("mark"), "exit": pos.get("exit"),
+            "stop": pos.get("stop"), "target": pos.get("target"), "pnl": pnl,
+            "result": _pnl_result(pnl), "why": pos.get("exit_reason") or ""}
+
+
+def read_trade_book(home):
+    """Open positions from the live session, and every closed trade the bot has recorded.
+
+    Closed trades include the live session and each replay under trader/replays.
+    A missing or unreadable file is skipped. Paper and live fills both land here;
+    the row does not place an order.
+    """
+    live_path = os.path.join(home, "trader", "state", "bot.json")
+    paths = []
+    if os.path.isfile(live_path):
+        paths.append(live_path)
+    replays = os.path.join(home, "trader", "replays")
+    if os.path.isdir(replays):
+        for day in sorted(os.listdir(replays)):
+            path = os.path.join(replays, day, "trader", "state", "bot.json")
+            if os.path.isfile(path):
+                paths.append(path)
+    opens, closed = [], []
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                state = json.load(fh) or {}
+        except (OSError, ValueError):
+            continue
+        date = state.get("date") or ""
+        live = os.path.abspath(path) == os.path.abspath(live_path)
+        for symbol, pos in (state.get("positions") or {}).items():
+            if not isinstance(pos, dict):
+                continue
+            when = pos.get("exit_time") or date
+            row = _trade_row(symbol, pos, when)
+            if pos.get("status") == "closed":
+                closed.append(row)
+            elif live and pos.get("status") == "open":
+                opens.append(row)
+    closed.sort(key=lambda row: row.get("when") or "", reverse=True)
+    wins = len([row for row in closed if row["result"] == "profit"])
+    losses = len([row for row in closed if row["result"] == "loss"])
+    return {"open": opens, "closed": closed,
+            "open_pnl": round(sum(row["pnl"] or 0 for row in opens), 2),
+            "closed_pnl": round(sum(row["pnl"] or 0 for row in closed), 2),
+            "wins": wins, "losses": losses}
+
+
 def describe(argv):
     """The command as shown in the log: without the --dir pair, which is always the data folder."""
     out, skip = [], False
@@ -201,14 +292,16 @@ class App(object):
         self.append("Day Trader Bot %s. Education and tooling, not financial advice. Most people who day trade "
                     "lose money.\nData folder: %s\n\nMarket: a live candle chart and last prices from Yahoo "
                     "Finance. It follows the symbols you type or pick, and draws the entry, stop and target "
-                    "of a position after Connect. Bot: replay a recorded day, or run today. Trade: connect, "
-                    "see the account, place one bracket order, close a position. FLATTEN ALL closes everything "
+                    "of a position after Connect. Bot: replay a recorded day, or run today. Trade: live "
+                    "positions, and the history of each closed trade with its profit or loss. FLATTEN ALL closes everything "
                     "and stops new entries for the day. Broker: Alpaca keys or a MetaTrader 5 login. Settings: "
                     "your limits, and the switch from paper to a live account (that switch asks you to type "
                     "%s).\n\n" % (VERSION, self.home, bot.LIVE_PHRASE))
         root.after(100, self._drain)
         self.update_info = None
         self.update_busy = False
+        self._trade_job = None
+        self._refresh_trades()
         if updater.settings(self.home).get("check_on_start", True):
             root.after(1500, lambda: self.check_updates(quiet=True))
 
@@ -653,18 +746,36 @@ class App(object):
             side="left", padx=12)
         ttk.Label(row, text="Entry blank: use the broker's price. Target blank: 2R.").pack(side="left")
 
-        cols = ("symbol", "side", "qty", "entry", "mark", "pnl", "stop", "target")
-        heads = ("Symbol", "Side", "Qty", "Entry", "Mark", "P&L", "Stop", "Target")
-        self.tree = ttk.Treeview(tab, columns=cols, show="headings", height=6)
+        live = ttk.LabelFrame(tab, text="Live positions")
+        live.pack(fill="both", expand=True, padx=8, pady=6)
+        self.trade_pnl_var = tk.StringVar(value="No live position. No closed trades yet.")
+        ttk.Label(live, textvariable=self.trade_pnl_var).pack(anchor="w", padx=6, pady=(4, 0))
+        cols = ("symbol", "side", "qty", "entry", "mark", "pnl", "result", "stop", "target")
+        heads = ("Symbol", "Side", "Qty", "Entry", "Mark", "P&L", "Result", "Stop", "Target")
+        self.tree = ttk.Treeview(live, columns=cols, show="headings", height=4)
         for c, h in zip(cols, heads):
             self.tree.heading(c, text=h)
-            self.tree.column(c, width=90, anchor="e" if c != "symbol" else "w")
-        self.tree.pack(fill="both", expand=True, padx=8, pady=6)
+            self.tree.column(c, width=80, anchor="e" if c != "symbol" else "w")
+        self.tree.tag_configure("profit", foreground="#1b7f3b")
+        self.tree.tag_configure("loss", foreground="#b00020")
+        self.tree.pack(fill="both", expand=True, padx=6, pady=4)
         self.trade_symbol.trace_add("write", lambda *a: self._trade_symbol_edited())
-        bar = ttk.Frame(tab)
-        bar.pack(fill="x", padx=8, pady=(0, 6))
+        bar = ttk.Frame(live)
+        bar.pack(fill="x", padx=6, pady=(0, 6))
         ttk.Button(bar, text="Close selected", command=self.close_selected).pack(side="left")
         ttk.Button(bar, text="Refresh positions", command=self.connect).pack(side="left", padx=6)
+
+        past = ttk.LabelFrame(tab, text="Trade history")
+        past.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        hcols = ("when", "symbol", "qty", "entry", "exit", "why", "result", "pnl")
+        hheads = ("When", "Symbol", "Qty", "Entry", "Exit", "Why", "Result", "P&L")
+        self.history = ttk.Treeview(past, columns=hcols, show="headings", height=6)
+        for c, h in zip(hcols, hheads):
+            self.history.heading(c, text=h)
+            self.history.column(c, width=90, anchor="e" if c not in ("symbol", "why", "result") else "w")
+        self.history.tag_configure("profit", foreground="#1b7f3b")
+        self.history.tag_configure("loss", foreground="#b00020")
+        self.history.pack(fill="both", expand=True, padx=6, pady=6)
 
     def _build_broker(self, tab):
         form = ttk.LabelFrame(tab, text="Alpaca. Paper keys until you switch to live on Settings. Values are saved "
@@ -879,16 +990,69 @@ class App(object):
         if not doc.get("paper", True):
             self.account_var.set("LIVE account, real money, %s equity %s" % (doc["broker"], _money(a.get("equity"))))
             self.account_lbl.configure(foreground="#b00020")
-        self.tree.delete(*self.tree.get_children())
-        for p in doc.get("positions") or []:
-            pnl = p.get("pnl") or 0
-            self.tree.insert("", "end", values=(
-                p.get("symbol"), p.get("side"), p.get("qty"), _money(p.get("entry")), _money(p.get("mark")),
-                "%s%s" % ("+" if pnl >= 0 else "-", _money(abs(pnl))),
-                _money(p.get("stop")) if p.get("stop") else "-",
-                _money(p.get("target")) if p.get("target") else "-"))
+        self._show_open_rows([_trade_row(p.get("symbol"), p) for p in doc.get("positions") or []])
+        self._refresh_trades()
         if self._tape_snap:
             self._draw_chart(self._tape_snap)
+
+    def _show_open_rows(self, rows):
+        self.tree.delete(*self.tree.get_children())
+        for row in rows:
+            self.tree.insert("", "end", tags=(row["result"],), values=(
+                row.get("symbol"), row.get("side"), row.get("qty"), _money(row.get("entry")),
+                _money(row.get("mark")), _signed_money(row.get("pnl")), row.get("result"),
+                _money(row.get("stop")) if row.get("stop") else "-",
+                _money(row.get("target")) if row.get("target") else "-"))
+
+    def _show_history_rows(self, rows):
+        self.history.delete(*self.history.get_children())
+        for row in rows:
+            why = {"stop": "stop", "target": "target", "flat_by": "flat at the close"}.get(
+                row.get("why") or "", row.get("why") or "-")
+            self.history.insert("", "end", tags=(row["result"],), values=(
+                row.get("when") or "-", row.get("symbol"), row.get("qty"), _money(row.get("entry")),
+                _money(row.get("exit")), why, row.get("result"), _signed_money(row.get("pnl"))))
+
+    def _refresh_trades(self):
+        """Read the session files and paint live positions plus closed profit and loss.
+
+        While the bot is running this uses the file it keeps writing, so the Trade
+        tab moves with the session. Connect still replaces the live rows with the
+        broker's own positions when the bot is idle.
+        """
+        if self._trade_job is not None:
+            try:
+                self.root.after_cancel(self._trade_job)
+            except tk.TclError:
+                pass
+            self._trade_job = None
+        if self._closing:
+            return
+        try:
+            book = read_trade_book(self.home)
+        except OSError:
+            book = {"open": [], "closed": [], "open_pnl": 0, "closed_pnl": 0, "wins": 0, "losses": 0}
+        running = self.runner is not None and self.runner.alive()
+        if running or not (self.account_doc and self.account_doc.get("positions") is not None):
+            self._show_open_rows(book["open"])
+            open_pnl = book["open_pnl"]
+            open_n = len(book["open"])
+        else:
+            open_n = len(self.tree.get_children())
+            open_pnl = round(sum(_position_pnl(p) or 0 for p in self.account_doc.get("positions") or []), 2)
+        self._show_history_rows(book["closed"])
+        if open_n:
+            live = "Live: %d open, unrealised %s." % (open_n, _signed_money(open_pnl))
+        else:
+            live = "No live position."
+        if book["closed"]:
+            past = " History: %d closed, %d profit, %d loss, realised %s." % (
+                len(book["closed"]), book["wins"], book["losses"], _signed_money(book["closed_pnl"]))
+        else:
+            past = " No closed trades yet."
+        self.trade_pnl_var.set(live + past)
+        if not self._closing:
+            self._trade_job = self.root.after(3000, self._refresh_trades)
 
     def flatten_all(self):
         account = "PAPER" if self._paper() else "LIVE, real money"
@@ -1238,6 +1402,12 @@ class App(object):
             except tk.TclError:
                 pass
             self._tape_job = None
+        if self._trade_job is not None:
+            try:
+                self.root.after_cancel(self._trade_job)
+            except tk.TclError:
+                pass
+            self._trade_job = None
         if self.runner and self.runner.alive():
             if not messagebox.askyesno("Quit", "The bot is running. Stop it and quit?"):
                 return

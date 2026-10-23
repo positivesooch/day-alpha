@@ -547,6 +547,10 @@ class Window(unittest.TestCase):
             self.assertEqual(app.chart_symbol.get(), "TSLA")
             self.assertEqual(str(app.btn_flatten.cget("text")), "FLATTEN ALL")
             self.assertEqual(str(app.btn_connect.cget("text")), "Connect")
+            self.assertEqual(app.history.heading("result")["text"], "Result")
+            self.assertEqual(app.history.heading("pnl")["text"], "P&L")
+            self.assertEqual(app.tree.heading("result")["text"], "Result")
+            self.assertIn("No live position", app.trade_pnl_var.get())
             self.assertEqual(str(app.btn_live_auto.cget("text")), "Run live, auto")
             app.mode_var.set("auto")
             app._explain_mode()
@@ -565,6 +569,41 @@ class Window(unittest.TestCase):
             self.assertEqual(str(app.btn_reel.cget("state")), "normal")
         finally:
             root.destroy()
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_trade_history_marks_profit_and_loss(self):
+        g = self.gui
+        d = tempfile.mkdtemp(prefix="bot-trades-")
+        try:
+            live = os.path.join(d, "trader", "state")
+            os.makedirs(live)
+            with open(os.path.join(live, "bot.json"), "w", encoding="utf-8") as fh:
+                json.dump({"date": "2026-10-22", "positions": {
+                    "TJX": {"status": "open", "qty": 25, "entry": 146.63, "mark": 147.00,
+                            "stop": 146.0, "target": 148.0},
+                    "TSLA": {"status": "closed", "qty": 8, "entry": 100.0, "exit": 90.0, "pnl": -80.0,
+                             "exit_reason": "stop", "exit_time": "2026-10-22 10:40"},
+                }}, fh)
+            replay = os.path.join(d, "trader", "replays", "2026-10-16", "trader", "state")
+            os.makedirs(replay)
+            with open(os.path.join(replay, "bot.json"), "w", encoding="utf-8") as fh:
+                json.dump({"date": "2026-10-16", "positions": {
+                    "TJX": {"status": "closed", "qty": 25, "entry": 147.07, "exit": 147.69, "pnl": 15.5,
+                            "exit_reason": "target", "exit_time": "2026-10-16 11:05"},
+                }}, fh)
+            book = g.read_trade_book(d)
+            self.assertEqual([row["symbol"] for row in book["open"]], ["TJX"])
+            self.assertEqual(book["open"][0]["result"], "profit")
+            self.assertEqual(book["open"][0]["pnl"], 9.25)
+            self.assertEqual([row["symbol"] for row in book["closed"]], ["TSLA", "TJX"])
+            self.assertEqual([row["result"] for row in book["closed"]], ["loss", "profit"])
+            self.assertEqual(book["wins"], 1)
+            self.assertEqual(book["losses"], 1)
+            self.assertEqual(book["closed_pnl"], -64.5)
+            self.assertEqual(g._pnl_result(0), "flat")
+            self.assertEqual(g._signed_money(-20.5), "-$20.50")
+            self.assertEqual(g._signed_money(15.5), "+$15.50")
+        finally:
             shutil.rmtree(d, ignore_errors=True)
 
 
