@@ -42,7 +42,7 @@ if ($env:DTB_ARGS -and -not $PSBoundParameters.Count) {
     }
 }
 $AppKey = '{7D2F3C7A-5B0E-4E2B-9B1A-0DA17BAD3B07}_is1'   # the installer's AppId; an upgrade keeps it
-$DefaultUrl = 'https://github.com/yoyossm/day-alpha/releases/latest/download/latest.json'
+$DefaultUrl = 'https://github.com/positivesooch/day-alpha/releases/latest/download/latest.json'
 
 function Get-Installed {
     foreach ($hive in 'HKCU:', 'HKLM:') {

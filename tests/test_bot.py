@@ -1166,6 +1166,10 @@ class Updates(unittest.TestCase):
         finally:
             del os.environ["DAYTRADERBOT_UPDATE_URL"]
         self.assertEqual(sorted(bot.DEFAULTS["update"]), sorted(updater.DEFAULTS))
+        with open(os.path.join(self.d, "trader", "bot.json"), "w") as fh:
+            json.dump({"update": {"url": updater.LEGACY_URLS[0]}}, fh)
+        self.assertEqual(updater.settings(self.d)["url"], updater.DEFAULT_URL)
+        self.assertIn("positivesooch/day-alpha", updater.DEFAULT_URL)
 
     def test_the_cli_checks_downloads_and_stops_short_of_running_on_a_no(self):
         updater.write_manifest(self.exe, "9.9.0", notes="Big news.")

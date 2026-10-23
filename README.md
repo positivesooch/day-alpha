@@ -348,8 +348,9 @@ installer), and the console menu has it as `u`. Nothing is downloaded or
 run without that click; the check itself sends nothing but the request.
 
 Where the release list lives is `update.url` in `trader\bot.json`: an
-https URL (the default points at this repository's GitHub releases, where
-the Windows workflow publishes `latest.json` next to each installer), or a
+https URL (the default is
+`https://github.com/positivesooch/day-alpha/releases/latest/download/latest.json`,
+where each release publishes `latest.json` next to the installer), or a
 folder or network share for a team that distributes the installer itself.
 `DAYTRADERBOT_UPDATE_URL` overrides it; `"check_on_start": false` turns the
 automatic check off. `releases\DayTraderBot-Update.cmd` is the same updater as one

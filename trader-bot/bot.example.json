@@ -62,7 +62,7 @@
     }
   },
   "update": {
-    "url": "https://github.com/yoyossm/day-alpha/releases/latest/download/latest.json",
+    "url": "https://github.com/positivesooch/day-alpha/releases/latest/download/latest.json",
     "check_on_start": true
   },
   "poll_seconds": 20,

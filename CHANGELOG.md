@@ -4,6 +4,14 @@ The installed app reads the newest entry's notes from `releases/latest.json`
 and shows them next to its "Update to ..." button. Keep the newest version at
 the top, one `## <version> (<date>)` heading per release.
 
+## 2.4.3 (2026-10-23)
+
+- Online updates from GitHub. Check for updates reads latest.json on
+  https://github.com/positivesooch/day-alpha and downloads
+  DayTraderBot-Setup from that same release. An older install that still
+  has the unused yoyossm address in trader\bot.json follows this release
+  list instead. FLATTEN ALL still closes everything.
+
 ## 2.4.2 (2026-10-23)
 
 - Live market chart. The Market tab draws today's candles (1 minute, 5

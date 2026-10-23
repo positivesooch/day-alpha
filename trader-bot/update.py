@@ -40,7 +40,12 @@ import urllib.parse
 import urllib.request
 
 MANIFEST = "latest.json"
-DEFAULT_URL = "https://github.com/yoyossm/day-alpha/releases/latest/download/" + MANIFEST
+DEFAULT_URL = "https://github.com/positivesooch/day-alpha/releases/latest/download/" + MANIFEST
+# The first builds looked at a repo name that was never created. An installed
+# copy still has that address in trader/bot.json; treat it as the default.
+LEGACY_URLS = (
+    "https://github.com/yoyossm/day-alpha/releases/latest/download/" + MANIFEST,
+)
 DEFAULTS = {"url": DEFAULT_URL, "check_on_start": True}
 UA = "day-trader-bot-updater/1.0 (python-urllib)"
 TIMEOUT = 20
@@ -80,6 +85,8 @@ def settings(home):
     if env:
         user = dict(user, url=env)
     out.update({k: v for k, v in user.items() if v is not None})
+    if out.get("url") in LEGACY_URLS:
+        out["url"] = DEFAULT_URL
     return out
 
 
