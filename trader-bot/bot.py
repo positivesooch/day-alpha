@@ -37,7 +37,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 
 # Frozen (the Windows build made by installer/DayTraderBot.spec): the pack's
 # folders are bundled under <bundle>/pack, and the exe itself is the Python
@@ -65,6 +65,7 @@ README = os.path.join(BUNDLE if FROZEN else PACK, "README.md")
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import mt5link  # noqa: E402  (the MetaTrader 5 link; standard library until the bot connects)
+import update as updater  # noqa: E402  (one-click updates for the installed app)
 
 
 def default_home():
@@ -97,6 +98,7 @@ DEFAULTS = {
                     "min_history_triggers": 0, "required": True},
     "execution": {"mode": "dry-run", "broker": "sim", "max_open_positions": 1, "fill_wait_seconds": 60},
     "mt5": json.loads(json.dumps(mt5link.DEFAULTS)),
+    "update": dict(updater.DEFAULTS),
     "poll_seconds": 20,
     "bar_grace_seconds": 25,
 }
@@ -1471,6 +1473,7 @@ MENU = [
     ("c", "Run today, live, confirm mode on MetaTrader 5: you type yes or no for each order",
      ["run", "--mode", "confirm", "--broker", "mt5"]),
     ("s", "Status of the current session", ["status", "--events", "15"]),
+    ("u", "Check for a newer version and install it (one key, the app restarts on the new one)", ["update"]),
     ("e", "Edit the settings (opens the trader folder)", None),
     ("q", "Quit", None),
 ]
@@ -1551,6 +1554,58 @@ def cmd_gui(a):
     return gui.main(["--dir", _workdir(a)])
 
 
+def cmd_update(a, input_fn=None, out=None):
+    """Check the release manifest; download, verify and run the installer on a yes."""
+    out = out or sys.stdout
+    ask = input_fn or input
+    home = _workdir(a)
+    url = getattr(a, "url", None) or updater.settings(home)["url"]
+    try:
+        info = updater.check(url, VERSION)
+    except updater.UpdateError as e:
+        raise BotError("update check failed: %s" % e)
+    if not info["available"]:
+        out.write("Day Trader Bot %s is the newest version (the release list at %s says %s).\n"
+                  % (VERSION, url, info["latest"]))
+        return 0
+    out.write("Day Trader Bot %s is available (you have %s)%s.\n" % (
+        info["latest"], VERSION, ", published %s" % info["published"] if info.get("published") else ""))
+    if info["notes"]:
+        out.write("\n" + info["notes"] + "\n\n")
+    if getattr(a, "check", False):
+        out.write("Run `update` without --check to install it.\n")
+        return 0
+    if not getattr(a, "yes", False):
+        try:
+            reply = ask("Download and install %s now? Reply yes or no: " % info["latest"])
+        except EOFError:
+            reply = ""
+        if (reply or "").strip().lower() not in ("y", "yes"):
+            out.write("Not now. Nothing was downloaded.\n")
+            return 0
+    last = [0]
+
+    def progress(got, total):
+        pct = int(100 * got / total) if total else 0
+        if pct >= last[0] + 10 or got == total:
+            last[0] = pct
+            out.write("  downloaded %s%s\n" % (format(got, ",d"), " of %s (%d%%)" % (format(total, ",d"), pct) if total else ""))
+            out.flush()
+    try:
+        path = updater.download(info["manifest"], getattr(a, "into", None), progress=progress)
+        out.write("Verified %s (SHA-256 matches the release list).\n" % os.path.basename(path))
+        if getattr(a, "download_only", False):
+            out.write("Saved to %s. Double-click it to install.\n" % path)
+            return 0
+        args = updater.install(path, relaunch=updater.app_exe() if getattr(a, "relaunch", False) else None)
+    except updater.UpdateError as e:
+        raise BotError(str(e))
+    out.write("Installing %s. This program closes now; the new version opens from the Start menu%s.\n"
+              % (info["latest"], " and comes back by itself" if args[0] == "cmd" else ""))
+    out.flush()
+    return 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["--tool"]:
@@ -1610,6 +1665,14 @@ def main(argv=None):
     p.add_argument("--no-prompt", action="store_true", help="do not ask for symbols before a run")
     p = sub.add_parser("gui", help="the window (what the installed app opens with)")
     p.add_argument("--dir")
+    p = sub.add_parser("update", help="check the release list; download, verify and install a newer version")
+    p.add_argument("--dir")
+    p.add_argument("--url", help="the release manifest (default: update.url in trader/bot.json)")
+    p.add_argument("--check", action="store_true", help="only say whether a newer version exists")
+    p.add_argument("--yes", action="store_true", help="install without asking")
+    p.add_argument("--download-only", action="store_true", help="save the verified installer and stop")
+    p.add_argument("--into", metavar="FOLDER", help="where to save the installer (default: the temp folder)")
+    p.add_argument("--relaunch", action="store_true", help="reopen the window when the installer is done")
 
     a = ap.parse_args(argv)
     if not a.cmd:
@@ -1617,7 +1680,7 @@ def main(argv=None):
         return 1
     try:
         code = {"init": cmd_init, "run": cmd_run, "once": cmd_once, "replay": cmd_replay, "status": cmd_status,
-                "menu": cmd_menu, "gui": cmd_gui}[a.cmd](a)
+                "menu": cmd_menu, "gui": cmd_gui, "update": cmd_update}[a.cmd](a)
     except BotError as e:
         print("trader-bot: %s" % e, file=sys.stderr)
         code = 1

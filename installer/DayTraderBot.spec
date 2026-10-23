@@ -53,7 +53,7 @@ hiddenimports = [
     "html.parser", "io", "json", "math", "random", "re", "runpy", "shutil", "statistics", "subprocess",
     "time", "urllib", "urllib.error", "urllib.parse", "urllib.request", "xml", "xml.etree",
     "xml.etree.ElementTree", "zipfile", "zlib", "ssl", "http.client", "http.cookiejar",
-    "mt5link",
+    "mt5link", "update",
 ]
 
 # MetaTrader 5 support (prop-firm accounts) rides along when the official

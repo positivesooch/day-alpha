@@ -152,6 +152,15 @@ runs the pack's tool scripts itself (no Python on the machine). Data lives
 in `%USERPROFILE%\DayTraderBot\trader\`; `DAYTRADERBOT_HOME` moves it. The
 README has the details.
 
+Updates are one click (`update.py`): the window checks the release list
+(`update.url` in `trader/bot.json`, a `latest.json` with the version, the
+installer's location, its SHA-256 and size, and the notes from
+`CHANGELOG.md`) and offers "Update to <version>"; the click downloads,
+verifies and runs the installer silently, then reopens the window.
+`bot.py update [--check|--yes|--download-only]` is the console form.
+Nothing is downloaded or run without the click, and a file whose hash does
+not match the release list is never run.
+
 ## Replays
 
 `replay` runs a whole session on a simulated clock, offline, on the sim

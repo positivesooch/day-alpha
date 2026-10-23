@@ -312,6 +312,28 @@ The window never trades by itself: every button starts `DayTraderBotCLI`
 with the arguments you would have typed. Without the installer, the same
 window is `python3 trader-bot/bot.py gui` (Debian/Ubuntu need `python3-tk`).
 
+**Updates are one click.** When the window opens it reads a small release
+list (`latest.json`) in the background; if a newer version is out, the
+top-right button says "Update to 2.4.0" and the log shows the notes from
+`CHANGELOG.md`. One click downloads the new installer, checks its SHA-256
+and size against the release list, installs it over the current version
+silently (same install folder, settings untouched) and reopens the window.
+`DayTraderBotCLI update` does the same from the console (`--check` only
+asks, `--yes` skips the question, `--download-only` just saves the verified
+installer), and the console menu has it as `u`. Nothing is downloaded or
+run without that click; the check itself sends nothing but the request.
+
+Where the release list lives is `update.url` in `trader\bot.json`: an
+https URL (the default points at this repository's GitHub releases, where
+the Windows workflow publishes `latest.json` next to each installer), or a
+folder or network share for a team that distributes the installer itself.
+`DAYTRADERBOT_UPDATE_URL` overrides it; `"check_on_start": false` turns the
+automatic check off. Every build writes `latest.json` with
+`installer\make_manifest.py` (its notes come from the version's section in
+`CHANGELOG.md`), so publishing a release is: bump `VERSION` in `bot.py`,
+add the changelog entry, tag, and copy the two files wherever `update.url`
+points.
+
 Build it yourself on Windows with Python 3.8+ and
 [Inno Setup 6](https://jrsoftware.org/isinfo.php) installed:
 

@@ -1018,5 +1018,167 @@ class MT5Bot(unittest.TestCase):
         self.assertEqual(g.build_argv("run", "TSLA", "auto", "mt5")[:5], ["run", "--mode", "auto", "--broker", "mt5"])
 
 
+updater = load("trader-bot", "update")
+
+
+class Updates(unittest.TestCase):
+    """The one-click update: manifest, version compare, verified download, the installer command."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="bot-upd-")
+        self.exe = os.path.join(self.d, "DayTraderBot-Setup-9.9.0.exe")
+        with open(self.exe, "wb") as fh:
+            fh.write(b"MZ fake installer " * 1000)
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def serve(self):
+        """A local HTTP server over the temp folder; returns (base_url, stop)."""
+        import http.server
+        import socketserver
+        import threading
+        folder = self.d
+
+        class Quiet(http.server.SimpleHTTPRequestHandler):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, directory=folder, **kw)
+
+            def log_message(self, *a):
+                pass
+        srv = socketserver.TCPServer(("127.0.0.1", 0), Quiet)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+        def stop():
+            srv.shutdown()
+            srv.server_close()
+        return "http://127.0.0.1:%d/" % srv.server_address[1], stop
+
+    def test_versions_compare_as_numbers(self):
+        self.assertEqual(updater.parse_version("v2.10.1"), (2, 10, 1, 0))
+        self.assertTrue(updater.newer("2.10.0", "2.9.9"))
+        self.assertFalse(updater.newer("2.3.0", "2.3.0"))
+        self.assertTrue(updater.newer("2.3.0", "2.3.0-beta"))
+        self.assertFalse(updater.newer("2.3.0-rc1", "2.3.0"))
+        with self.assertRaises(updater.UpdateError):
+            updater.parse_version("latest")
+
+    def test_manifest_is_written_from_the_changelog_and_read_back(self):
+        with open(os.path.join(ROOT, "CHANGELOG.md")) as fh:
+            self.assertIn("## %s" % bot.VERSION, fh.read())
+        notes = updater.notes_from_changelog(os.path.join(ROOT, "CHANGELOG.md"), bot.VERSION)
+        self.assertIn("One-click updates", notes)
+        self.assertNotIn("## 2.2.0", notes)
+        doc = updater.write_manifest(self.exe, "9.9.0", notes=notes)
+        path = os.path.join(self.d, "latest.json")
+        with open(path) as fh:
+            back = json.load(fh)
+        self.assertEqual(back["version"], "9.9.0")
+        self.assertEqual(back["installer"]["url"], "DayTraderBot-Setup-9.9.0.exe")
+        self.assertEqual(back["installer"]["sha256"], updater.sha256_of(self.exe))
+        self.assertEqual(back["installer"]["size"], os.path.getsize(self.exe))
+        self.assertEqual(doc["notes"], notes)
+        # the build script's wrapper does the same from the command line
+        import subprocess as sp
+        out = sp.run([sys.executable, os.path.join(ROOT, "installer", "make_manifest.py"), self.exe,
+                      "--url", "https://example.test/dl/DayTraderBot-Setup-9.9.0.exe", "--version", "9.9.0"],
+                     capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        with open(path) as fh:
+            self.assertEqual(json.load(fh)["installer"]["url"], "https://example.test/dl/DayTraderBot-Setup-9.9.0.exe")
+
+    def test_check_and_verified_download_over_http_and_from_a_folder(self):
+        updater.write_manifest(self.exe, "9.9.0", notes="Big news.")
+        base, stop = self.serve()
+        try:
+            info = updater.check(base + "latest.json", "2.3.0")
+            self.assertTrue(info["available"])
+            self.assertEqual((info["latest"], info["notes"]), ("9.9.0", "Big news."))
+            self.assertEqual(info["manifest"]["installer"]["_location"], base + "DayTraderBot-Setup-9.9.0.exe")
+            seen = []
+            dest = os.path.join(self.d, "dl")
+            path = updater.download(info["manifest"], dest, progress=lambda g, t: seen.append((g, t)))
+            self.assertEqual(os.path.basename(path), "DayTraderBot-Setup-9.9.0.exe")
+            self.assertEqual(updater.sha256_of(path), updater.sha256_of(self.exe))
+            self.assertEqual(seen[-1], (os.path.getsize(self.exe),) * 2)
+            self.assertEqual(updater.download(info["manifest"], dest), path)  # cached, same hash
+            # a tampered file is refused
+            with open(os.path.join(self.d, "latest.json")) as fh:
+                m = json.load(fh)
+            m["installer"]["sha256"] = "0" * 64
+            with open(os.path.join(self.d, "latest.json"), "w") as fh:
+                json.dump(m, fh)
+            info = updater.check(base + "latest.json", "2.3.0")
+            with self.assertRaises(updater.UpdateError) as cm:
+                updater.download(info["manifest"], os.path.join(self.d, "dl2"))
+            self.assertIn("SHA-256", str(cm.exception))
+            self.assertFalse(os.path.exists(os.path.join(self.d, "dl2", "DayTraderBot-Setup-9.9.0.exe")))
+            with self.assertRaises(updater.UpdateError):
+                updater.check(base + "missing.json", "2.3.0")
+        finally:
+            stop()
+        # the same manifest from a folder path (a network share works the same way)
+        updater.write_manifest(self.exe, "9.9.0")
+        info = updater.check(os.path.join(self.d, "latest.json"), "2.3.0")
+        self.assertEqual(info["manifest"]["installer"]["_location"], self.exe)
+        self.assertFalse(updater.check(os.path.join(self.d, "latest.json"), "9.9.0")["available"])
+        self.assertFalse(updater.check(os.path.join(self.d, "latest.json"), "10.0.0")["available"])
+
+    def test_the_installer_command_is_silent_and_relaunches(self):
+        args, via_cmd = updater.installer_args(r"C:\t\Setup.exe")
+        self.assertEqual(args[:3], [r"C:\t\Setup.exe", "/SILENT", "/NORESTART"])
+        self.assertIn("/CLOSEAPPLICATIONS", args)
+        self.assertFalse(via_cmd)
+        args, via_cmd = updater.installer_args(r"C:\t\Setup.exe", relaunch=r"C:\App\DayTraderBot.exe")
+        self.assertEqual(args[:2], ["cmd", "/c"])
+        self.assertIn('start "" /wait "C:\\t\\Setup.exe" /SILENT', args[2])
+        self.assertTrue(args[2].endswith('&& start "" "C:\\App\\DayTraderBot.exe"'))
+        if sys.platform != "win32":
+            with self.assertRaises(updater.UpdateError):
+                updater.install(self.exe)
+
+    def test_settings_come_from_bot_json_and_the_environment(self):
+        os.makedirs(os.path.join(self.d, "trader"))
+        self.assertEqual(updater.settings(self.d), updater.DEFAULTS)
+        with open(os.path.join(self.d, "trader", "bot.json"), "w") as fh:
+            json.dump({"update": {"url": r"\\nas\share\latest.json", "check_on_start": False}}, fh)
+        s = updater.settings(self.d)
+        self.assertEqual((s["url"], s["check_on_start"]), (r"\\nas\share\latest.json", False))
+        os.environ["DAYTRADERBOT_UPDATE_URL"] = "https://x.test/latest.json"
+        try:
+            self.assertEqual(updater.settings(self.d)["url"], "https://x.test/latest.json")
+        finally:
+            del os.environ["DAYTRADERBOT_UPDATE_URL"]
+        self.assertEqual(sorted(bot.DEFAULTS["update"]), sorted(updater.DEFAULTS))
+
+    def test_the_cli_checks_downloads_and_stops_short_of_running_on_a_no(self):
+        updater.write_manifest(self.exe, "9.9.0", notes="Big news.")
+        manifest = os.path.join(self.d, "latest.json")
+        home = os.path.join(self.d, "home")
+        os.makedirs(os.path.join(home, "trader"))
+        code, out, err = run(["update", "--check", "--dir", home, "--url", manifest])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Day Trader Bot 9.9.0 is available (you have %s)" % bot.VERSION, out)
+        self.assertIn("Big news.", out)
+        code, out, err = run(["update", "--dir", home, "--url", manifest, "--yes", "--download-only",
+                              "--into", os.path.join(self.d, "saved")])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Verified DayTraderBot-Setup-9.9.0.exe", out)
+        self.assertTrue(os.path.exists(os.path.join(self.d, "saved", "DayTraderBot-Setup-9.9.0.exe")))
+        a = type("A", (), {"dir": home, "url": manifest, "check": False, "yes": False, "download_only": False,
+                           "into": None, "relaunch": False})()
+        out = io.StringIO()
+        code = bot.cmd_update(a, input_fn=lambda prompt: "no", out=out)
+        self.assertEqual(code, 0)
+        self.assertIn("Not now. Nothing was downloaded.", out.getvalue())
+        updater.write_manifest(self.exe, bot.VERSION)
+        code, out, err = run(["update", "--check", "--dir", home, "--url", manifest])
+        self.assertIn("is the newest version", out)
+        code, out, err = run(["update", "--check", "--dir", home, "--url", os.path.join(self.d, "nope.json")])
+        self.assertEqual(code, 1)
+        self.assertIn("update check failed", err)
+        self.assertIn(["update"], [argv for _, _, argv in bot.MENU])
+
+
 if __name__ == "__main__":
     unittest.main()

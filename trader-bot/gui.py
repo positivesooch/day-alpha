@@ -35,6 +35,7 @@ BUNDLE = getattr(sys, "_MEIPASS", None) or (os.path.dirname(sys.executable) if F
 PACK_BOT = os.path.join(BUNDLE, "pack", "trader-bot") if FROZEN else HERE
 sys.path.insert(0, PACK_BOT)
 import bot  # noqa: E402  (the same module the console runs)
+import update as updater  # noqa: E402
 
 VERSION = bot.VERSION
 CLI_NAME = "DayTraderBotCLI.exe" if sys.platform == "win32" else "DayTraderBotCLI"
@@ -183,6 +184,10 @@ class App(object):
                     "lose money.\nData folder: %s\n\nStart with \"Replay the reel day\": the whole method on a "
                     "recorded session, nothing placed.\n\n" % (VERSION, self.home))
         root.after(100, self._drain)
+        self.update_info = None
+        self.update_busy = False
+        if updater.settings(self.home).get("check_on_start", True):
+            root.after(1500, lambda: self.check_updates(quiet=True))
 
     # ---- layout
 
@@ -196,6 +201,8 @@ class App(object):
         self.account_var = tk.StringVar()
         self.account_lbl = ttk.Label(head, textvariable=self.account_var)
         self.account_lbl.pack(side="right")
+        self.btn_update = ttk.Button(head, text="Check for updates", command=self.check_updates)
+        self.btn_update.pack(side="right", padx=(0, 12))
 
         form = ttk.LabelFrame(r, text="What to do")
         form.pack(fill="x", **pad)
@@ -357,6 +364,100 @@ class App(object):
             self.symbols_var.set(self._symbols_from_config())
         if not bot.open_folder(os.path.join(self.home, "trader")):
             messagebox.showinfo("Settings", "Edit these in any text editor:\n\n" + "\n".join(paths))
+
+    # ---- updates
+
+    def check_updates(self, quiet=False):
+        """Ask the release list in the background; the result lands in _update_checked."""
+        if self.update_busy:
+            return
+        if self.update_info and not quiet:
+            self.install_update()
+            return
+        url = updater.settings(self.home)["url"]
+        self.update_busy = True
+        self.btn_update.configure(state="disabled", text="Checking...")
+
+        def work():
+            try:
+                result = updater.check(url, VERSION)
+            except updater.UpdateError as e:
+                result = e
+            self.root.after(0, lambda: self._update_checked(result, quiet))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_checked(self, result, quiet):
+        self.update_busy = False
+        if isinstance(result, Exception):
+            self.btn_update.configure(state="normal", text="Check for updates")
+            if not quiet:
+                messagebox.showwarning("Updates", "Could not check for updates.\n\n%s" % result)
+            return
+        if not result["available"]:
+            self.btn_update.configure(state="normal", text="Check for updates")
+            if not quiet:
+                messagebox.showinfo("Updates", "Day Trader Bot %s is the newest version." % VERSION)
+            return
+        self.update_info = result
+        self.btn_update.configure(state="normal", text="Update to %s" % result["latest"])
+        self.append("Day Trader Bot %s is available (you have %s). Click \"Update to %s\" at the top right: "
+                    "it downloads the installer, checks it, installs over this version and reopens the window.\n%s\n"
+                    % (result["latest"], VERSION, result["latest"],
+                       ("\n" + result["notes"] + "\n") if result["notes"] else ""), "prompt")
+        if not quiet:
+            self.install_update()
+
+    def install_update(self):
+        info = self.update_info
+        if not info or self.update_busy:
+            return
+        if self.runner and self.runner.alive():
+            messagebox.showinfo("Updates", "The bot is running. Stop it first, then update.")
+            return
+        if not messagebox.askyesno("Update to %s" % info["latest"],
+                                   "Download Day Trader Bot %s (%s MB), verify it, and install it over %s now?\n\n"
+                                   "The window closes while the installer runs and opens again on the new version. "
+                                   "Your settings and sessions in %s are kept."
+                                   % (info["latest"], round(int(info["manifest"]["installer"].get("size") or 0)
+                                                            / 1048576.0, 1), VERSION, self.home)):
+            return
+        self.update_busy = True
+        self.btn_update.configure(state="disabled", text="Downloading...")
+        for b in (self.btn_reel, self.btn_run, self.btn_status):
+            b.configure(state="disabled")
+
+        def progress(got, total):
+            pct = int(100 * got / total) if total else 0
+            self.root.after(0, lambda: self.status_var.set("downloading the update: %d%%" % pct))
+
+        def work():
+            try:
+                path = updater.download(info["manifest"], progress=progress)
+                self.root.after(0, lambda: self._update_ready(path))
+            except updater.UpdateError as e:
+                self.root.after(0, lambda: self._update_failed(e))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_failed(self, err):
+        self.update_busy = False
+        self.status_var.set("idle")
+        self.btn_update.configure(state="normal", text="Update to %s" % self.update_info["latest"])
+        for b in (self.btn_reel, self.btn_run, self.btn_status):
+            b.configure(state="normal")
+        messagebox.showerror("Update failed", "Nothing was installed.\n\n%s" % err)
+
+    def _update_ready(self, path):
+        self.status_var.set("installing %s" % self.update_info["latest"])
+        try:
+            updater.install(path, relaunch=updater.app_exe())
+        except updater.UpdateError as e:
+            self.update_busy = False
+            messagebox.showinfo("Installer saved", "%s\n\nRun it yourself: %s" % (e, path))
+            self.btn_update.configure(state="normal", text="Update to %s" % self.update_info["latest"])
+            for b in (self.btn_reel, self.btn_run, self.btn_status):
+                b.configure(state="normal")
+            return
+        self.root.after(300, self.root.destroy)
 
     def close(self):
         if self.runner and self.runner.alive():

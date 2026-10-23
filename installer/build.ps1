@@ -15,13 +15,18 @@
 .PARAMETER SkipInstaller
   Stop after PyInstaller: dist\DayTraderBot\ is enough to run or zip.
 
+.PARAMETER ManifestUrl
+  The URL the installer will be downloaded from, written into latest.json (the app's one-click
+  update reads it). Default: the installer's file name, relative to wherever latest.json is served.
+
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File installer\build.ps1
 #>
 [CmdletBinding()]
 param(
     [switch]$SkipInstaller,
-    [string]$Python = "python"
+    [string]$Python = "python",
+    [string]$ManifestUrl = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -74,4 +79,8 @@ if (-not $Iscc) {
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
 
 $Setup = Join-Path $Root "installer\Output\DayTraderBot-Setup-$Version.exe"
-Write-Host "`nDone: $Setup" -ForegroundColor Green
+$ManifestArgs = @("installer\make_manifest.py", $Setup)
+if ($ManifestUrl) { $ManifestArgs += @("--url", $ManifestUrl) }
+& $Python @ManifestArgs
+if ($LASTEXITCODE -ne 0) { throw "make_manifest failed" }
+Write-Host "`nDone: $Setup (and latest.json next to it, for the app's one-click update)" -ForegroundColor Green

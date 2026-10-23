@@ -60,6 +60,10 @@
       "daily_reset_server_time": "00:00"
     }
   },
+  "update": {
+    "url": "https://github.com/yoyossm/day-alpha/releases/latest/download/latest.json",
+    "check_on_start": true
+  },
   "poll_seconds": 20,
   "bar_grace_seconds": 25
 }
