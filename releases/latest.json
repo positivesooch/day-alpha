@@ -1,12 +1,12 @@
 {
   "name": "Day Trader Bot",
-  "version": "2.4.8",
+  "version": "2.4.9",
   "published": "2026-10-23",
   "installer": {
-    "url": "https://github.com/positivesooch/day-alpha/releases/download/v2.4.8/DayTraderBot-Setup-2.4.8.exe",
-    "file": "DayTraderBot-Setup-2.4.8.exe",
-    "sha256": "fc947795df7263c8ee661811402b164a2ef8a926953668e9b967305c39f15f3f",
-    "size": 18629993
+    "url": "https://github.com/positivesooch/day-alpha/releases/download/v2.4.9/DayTraderBot-Setup-2.4.9.exe",
+    "file": "DayTraderBot-Setup-2.4.9.exe",
+    "sha256": "09390b14796d4c5683c7d29c04cd588ccc94997490493e8869eef38d8964644d",
+    "size": 18627111
   },
-  "notes": "- A damaged session file (trader\\state\\bot.json) no longer stops the bot.\n  The file is copied aside and the trades that can still be read are kept.\n  When nothing can be read, the bot starts a fresh session. Check open\n  positions at the broker before the next run. FLATTEN ALL still closes\n  everything."
+  "notes": "- The window stays open when trader\\state\\bot.json is damaged. The installed\n  app has no console, so the repair note no longer crashes the window.\n  Readable trades are kept. FLATTEN ALL still closes everything."
 }
