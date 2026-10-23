@@ -1,12 +1,12 @@
 {
   "name": "Day Trader Bot",
-  "version": "2.4.3",
+  "version": "2.4.4",
   "published": "2026-10-23",
   "installer": {
-    "url": "DayTraderBot-Setup-2.4.3.exe",
-    "file": "DayTraderBot-Setup-2.4.3.exe",
-    "sha256": "20def38561250bad94c034c7d6332d98b67603464a8549a60626d3eccd80d9e7",
-    "size": 18051196
+    "url": "https://github.com/positivesooch/day-alpha/releases/download/v2.4.4/DayTraderBot-Setup-2.4.4.exe",
+    "file": "DayTraderBot-Setup-2.4.4.exe",
+    "sha256": "0aa0d9ff7a101eb3eae954487bd1df8d86be9aa6024fbe519046fb4b018f0285",
+    "size": 18607142
   },
-  "notes": "- Online updates from GitHub. Check for updates reads latest.json on\n  https://github.com/positivesooch/day-alpha and downloads\n  DayTraderBot-Setup from that same release. An older install that still\n  has the unused yoyossm address in trader\\bot.json follows this release\n  list instead. FLATTEN ALL still closes everything."
+  "notes": "- This build replaces the installer on the GitHub release. Check for updates\n  downloads it from the positivesooch/day-alpha release. FLATTEN ALL still\n  closes everything."
 }

@@ -4,6 +4,12 @@ The installed app reads the newest entry's notes from `releases/latest.json`
 and shows them next to its "Update to ..." button. Keep the newest version at
 the top, one `## <version> (<date>)` heading per release.
 
+## 2.4.4 (2026-10-23)
+
+- This build replaces the installer on the GitHub release. Check for updates
+  downloads it from the positivesooch/day-alpha release. FLATTEN ALL still
+  closes everything.
+
 ## 2.4.3 (2026-10-23)
 
 - Online updates from GitHub. Check for updates reads latest.json on
