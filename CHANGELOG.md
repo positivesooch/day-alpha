@@ -4,6 +4,14 @@ The installed app reads the newest entry's notes from `releases/latest.json`
 and shows them next to its "Update to ..." button. Keep the newest version at
 the top, one `## <version> (<date>)` heading per release.
 
+## 2.4.8 (2026-10-23)
+
+- A damaged session file (trader\state\bot.json) no longer stops the bot.
+  The file is copied aside and the trades that can still be read are kept.
+  When nothing can be read, the bot starts a fresh session. Check open
+  positions at the broker before the next run. FLATTEN ALL still closes
+  everything.
+
 ## 2.4.7 (2026-10-23)
 
 - Check for updates downloads the installer from the GitHub release at

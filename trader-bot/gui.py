@@ -171,10 +171,8 @@ def read_trade_book(home):
                 paths.append(path)
     opens, closed = [], []
     for path in paths:
-        try:
-            with open(path, encoding="utf-8") as fh:
-                state = json.load(fh) or {}
-        except (OSError, ValueError):
+        state = bot.read_state(path)
+        if not state:
             continue
         date = state.get("date") or ""
         live = os.path.abspath(path) == os.path.abspath(live_path)
@@ -1032,6 +1030,9 @@ class App(object):
             book = read_trade_book(self.home)
         except OSError:
             book = {"open": [], "closed": [], "open_pnl": 0, "closed_pnl": 0, "wins": 0, "losses": 0}
+        if bot.STATE_NOTE and bot.STATE_NOTE != getattr(self, "_state_note", None):
+            self._state_note = bot.STATE_NOTE
+            self.append(bot.STATE_NOTE + "\n", "bad")
         running = self.runner is not None and self.runner.alive()
         if running or not (self.account_doc and self.account_doc.get("positions") is not None):
             self._show_open_rows(book["open"])

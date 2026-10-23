@@ -33,12 +33,13 @@ import runpy
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.4.7"
+VERSION = "2.4.8"
 
 # Frozen (the Windows build made by installer/DayTraderBot.spec): the pack's
 # folders are bundled under <bundle>/pack, and the exe itself is the Python
@@ -209,15 +210,204 @@ def read_json(path, required=True, what="file"):
             raise BotError("%s is not valid JSON: %s" % (path, e))
 
 
+def _scrub(obj):
+    """JSON values only. NaN and infinity become null so a save cannot write a file Python will refuse to read."""
+    if isinstance(obj, float):
+        if obj != obj or obj == float("inf") or obj == float("-inf"):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return dict((k, _scrub(v)) for k, v in obj.items())
+    if isinstance(obj, (list, tuple)):
+        return [_scrub(v) for v in obj]
+    return obj
+
+
 def write_json(path, doc):
-    d = os.path.dirname(path)
-    if d:
-        os.makedirs(d, exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(doc, fh, indent=2)
-        fh.write("\n")
-    os.replace(tmp, path)
+    """Replace path with doc. The temp file is unique, so two saves cannot truncate each other."""
+    folder = os.path.dirname(os.path.abspath(path))
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".%s-" % os.path.basename(path), suffix=".tmp", dir=folder or None)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(_scrub(doc), fh, indent=2, allow_nan=False)
+            fh.write("\n")
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _closers(text):
+    """The brackets still open in text, or None when a string is unfinished or a bracket mismatches."""
+    stack = []
+    in_str = False
+    esc = False
+    for c in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            stack.append("}")
+        elif c == "[":
+            stack.append("]")
+        elif c in "}]":
+            if not stack or stack[-1] != c:
+                return None
+            stack.pop()
+    if in_str:
+        return None
+    return "".join(reversed(stack))
+
+
+def _cut_points(text):
+    """Offsets where a complete value ends, so a cut-off tail can be dropped."""
+    points = []
+    in_str = False
+    esc = False
+    depth = 0
+    for i, c in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c in "{[":
+            depth += 1
+        elif c in "}]":
+            if depth:
+                depth -= 1
+            points.append(i + 1)
+        elif c == "," and depth:
+            points.append(i)
+    return points
+
+
+def salvage_json_text(text):
+    """A dict from text, or from the longest intact prefix when the tail was cut off. None when nothing is."""
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    try:
+        doc = json.loads(text)
+        return doc if isinstance(doc, dict) else None
+    except ValueError as err:
+        limit = getattr(err, "pos", None)
+        if limit is None:
+            limit = len(text)
+    prefix = text[:limit]
+    points = _cut_points(prefix)
+    points.append(len(prefix))
+    seen = 0
+    tried = set()
+    for end in reversed(points):
+        if end in tried or end <= 0:
+            continue
+        tried.add(end)
+        seen += 1
+        head = prefix[:end].rstrip()
+        while head and head[-1] in ",:":
+            head = head[:-1].rstrip()
+        closers = _closers(head) if head else None
+        if closers is None:
+            if seen > 80:
+                break
+            continue
+        try:
+            doc = json.loads(head + closers)
+        except ValueError:
+            if seen > 80:
+                break
+            continue
+        if isinstance(doc, dict) and doc:
+            return doc
+    return None
+
+
+def _copy_aside(path):
+    folder = os.path.dirname(path)
+    name = os.path.basename(path) + ".broken"
+    dest = os.path.join(folder, name)
+    n = 2
+    while os.path.exists(dest):
+        dest = os.path.join(folder, "%s-%d" % (name, n))
+        n += 1
+    shutil.copy2(path, dest)
+    return dest
+
+
+# Set when a session file was damaged, so the window can say so once.
+STATE_NOTE = None
+
+
+def read_state(path):
+    """The session at path. A damaged file is copied aside. Trades that can still
+    be read are written back; otherwise the bad file is moved aside and this
+    returns None so the bot can start a fresh session."""
+    global STATE_NOTE
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    except ValueError as e:
+        dest = _copy_aside(path)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        STATE_NOTE = ("%s could not be read (%s). It was moved to %s. The bot will start a fresh session. "
+                      "Check open positions at the broker before you run it." % (path, e, dest))
+        sys.stderr.write("trader-bot: %s\n" % STATE_NOTE)
+        return None
+    try:
+        doc = json.loads(text)
+    except ValueError as e:
+        dest = _copy_aside(path)
+        salvaged = salvage_json_text(text)
+        keep = isinstance(salvaged, dict) and any(
+            k in salvaged for k in ("positions", "candidates", "events", "date", "created_by"))
+        if keep:
+            try:
+                write_json(path, salvaged)
+            except OSError:
+                keep = False
+        if keep:
+            STATE_NOTE = ("%s is not valid JSON (%s). A copy is at %s. The readable trades were kept."
+                          % (path, e, dest))
+            sys.stderr.write("trader-bot: %s\n" % STATE_NOTE)
+            return salvaged
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        STATE_NOTE = ("%s is not valid JSON (%s). It was moved to %s. The bot will start a fresh session. "
+                      "Check open positions at the broker before you run it." % (path, e, dest))
+        sys.stderr.write("trader-bot: %s\n" % STATE_NOTE)
+        return None
+    return doc if isinstance(doc, dict) else None
 
 
 def merged(defaults, user):
@@ -697,7 +887,7 @@ class Bot(object):
         self.scan_offline = scan_offline
         self.tool = Tool(self.workdir, lambda: self.now if (self.replay or self.now is not None) else None, self.log)
         self.state_path = os.path.join(self.trader, "state", "bot.json")
-        self.state = read_json(self.state_path, required=False) or {}
+        self.state = read_state(self.state_path) or {}
         if self.broker_name == "sim":
             self.broker = SimBroker(self.bars)
         elif self.broker_name == "alpaca":
@@ -1536,14 +1726,14 @@ def cmd_replay(a):
 def cmd_status(a):
     workdir = _workdir(a)
     path = os.path.join(workdir, "trader", "state", "bot.json")
-    st = read_json(path, required=False)
+    st = read_state(path)
     if not st:
         # no live session: the newest replay, if there is one
         replays = os.path.join(workdir, "trader", "replays")
         days = sorted(os.listdir(replays)) if os.path.isdir(replays) else []
         for day in reversed(days):
             alt = os.path.join(replays, day, "trader", "state", "bot.json")
-            st = read_json(alt, required=False)
+            st = read_state(alt)
             if st:
                 if not a.json:
                     print("No live session yet; this is the newest replay (%s):\n" % day)

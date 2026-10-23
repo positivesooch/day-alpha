@@ -626,6 +626,58 @@ class Config(unittest.TestCase):
             if isinstance(v, dict):
                 self.assertEqual(sorted(ex[k]), sorted(v), k)
 
+    def test_a_cut_off_session_keeps_the_open_trade_and_a_fresh_one_starts(self):
+        d = tempfile.mkdtemp(prefix="bot-state-")
+        try:
+            os.makedirs(os.path.join(d, "trader"))
+            shutil.copy(CFG, os.path.join(d, "trader", "config.json"))
+            doc = {"created_by": "trader-bot", "date": "2026-10-23", "mode": "auto", "broker": "sim",
+                   "paper": True, "positions": {"TJX": {"status": "open", "qty": 25, "entry": 146.63,
+                                                       "stop": 145.0, "target": 148.0, "pnl": None}},
+                   "events": [{"at": "2026-10-23 09:30", "text": "ready"},
+                              {"at": "2026-10-23 09:35", "text": "still open"}]}
+            text = json.dumps(doc, indent=2) + "\n"
+            cut = text.index('"still open"')
+            broken = text[:cut + 4]  # cuts the string, the same shape as a save that was truncated
+            self.assertIsNotNone(bot.salvage_json_text(broken))
+            folder = os.path.join(d, "trader", "state")
+            os.makedirs(folder)
+            path = os.path.join(folder, "bot.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(broken)
+            err = io.StringIO()
+            with redirect_stderr(err):
+                got = bot.read_state(path)
+            self.assertEqual(got["positions"]["TJX"]["qty"], 25)
+            self.assertEqual(got["positions"]["TJX"]["status"], "open")
+            with open(path, encoding="utf-8") as fh:
+                self.assertEqual(json.load(fh)["positions"]["TJX"]["entry"], 146.63)
+            self.assertTrue(any(name.startswith("bot.json.broken") for name in os.listdir(folder)))
+            self.assertIn("readable trades were kept", err.getvalue())
+            self.assertIn("not valid JSON", err.getvalue())
+            code, text, err = run(["status", "--dir", d])
+            self.assertEqual(code, 0, err)
+            self.assertIn("open   TJX: 25 x $146.63", text)
+            # NaN must not be written as the token NaN, which a strict reader rejects
+            bot.write_json(path, {"pnl": float("nan"), "positions": {}})
+            with open(path, encoding="utf-8") as fh:
+                raw = fh.read()
+            self.assertNotIn("NaN", raw)
+            self.assertIsNone(json.loads(raw)["pnl"])
+            # a file with no JSON object at all is moved aside and the bot still starts
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("not json at all\n")
+            err = io.StringIO()
+            with redirect_stderr(err):
+                self.assertIsNone(bot.read_state(path))
+            self.assertFalse(os.path.exists(path))
+            self.assertIn("fresh session", err.getvalue())
+            with redirect_stderr(io.StringIO()):
+                b = bot.Bot(d, {}, mode="dry-run")
+            self.assertEqual(b.state, {})
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_bad_mode_and_broker_are_refused(self):
         d = tempfile.mkdtemp(prefix="bot-cfg-")
         try:

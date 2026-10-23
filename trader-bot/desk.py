@@ -331,7 +331,7 @@ def cmd_resume(a):
     paths = _paths(workdir)
     if os.path.exists(paths["halt"]):
         os.remove(paths["halt"])
-    st = read_json(paths["state"], required=False)
+    st = bot.read_state(paths["state"])
     if st and st.get("halted"):
         st["halted"] = None
         st.setdefault("events", []).append({"at": ny_text(parse_now(None)), "text": "halt lifted by you"})
