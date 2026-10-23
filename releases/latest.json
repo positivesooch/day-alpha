@@ -1,12 +1,12 @@
 {
   "name": "Day Trader Bot",
-  "version": "2.4.6",
+  "version": "2.4.7",
   "published": "2026-10-23",
   "installer": {
-    "url": "https://github.com/positivesooch/day-alpha/releases/download/v2.4.6/DayTraderBot-Setup-2.4.6.exe",
-    "file": "DayTraderBot-Setup-2.4.6.exe",
-    "sha256": "c930dd4faaa38a4fce98e25e354cf3ecf846e4aef559d9040d627c0a426087d9",
-    "size": 18619370
+    "url": "https://github.com/positivesooch/day-alpha/releases/download/v2.4.7/DayTraderBot-Setup-2.4.7.exe",
+    "file": "DayTraderBot-Setup-2.4.7.exe",
+    "sha256": "98c8338514b30c04bf1b33df0f28e516d5f2240fa9d194272ad01131018f8fd2",
+    "size": 18616268
   },
-  "notes": "- Trade history. The Trade tab lists live positions and every closed trade,\n  with profit or loss on each row and a realised total. It keeps reading the\n  session while the bot runs. FLATTEN ALL still closes everything."
+  "notes": "- Check for updates downloads the installer from the GitHub release at\n  https://github.com/positivesooch/day-alpha. A blank update address, a\n  value that is only slashes, or a Windows path that is not on this PC\n  uses that release list. The downloaded setup runs as that file. FLATTEN ALL\n  still closes everything."
 }
