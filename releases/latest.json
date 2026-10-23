@@ -1,0 +1,12 @@
+{
+  "name": "Day Trader Bot",
+  "version": "2.3.0",
+  "published": "2026-10-23",
+  "installer": {
+    "url": "DayTraderBot-Setup-2.3.0.exe",
+    "file": "DayTraderBot-Setup-2.3.0.exe",
+    "sha256": "855eef19fc891668b3eef50ef0e9a07bb71842636678ecb7466abb1db8919d29",
+    "size": 17916827
+  },
+  "notes": "- One-click updates. The window checks the release list when it opens and\n  shows \"Update to <version>\" at the top right when there is a newer one; one\n  click downloads the installer, checks its SHA-256 and size against the\n  release list, installs it over the current version silently and reopens\n  the window. `DayTraderBotCLI update` does the same from the console, and\n  the menu has it as `u`. `update.url` in `trader\\bot.json` says where the\n  release list lives (an https URL, a folder or a network share); nothing is\n  downloaded or run without your click.\n- `installer\\make_manifest.py` writes `latest.json` for a built installer;\n  `build.ps1` and the Windows workflow call it, and the workflow attaches it\n  to the release next to the installer."
+}
