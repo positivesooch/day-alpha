@@ -1,12 +1,12 @@
 {
   "name": "Day Trader Bot",
-  "version": "2.5.0",
+  "version": "2.5.1",
   "published": "2026-10-24",
   "installer": {
-    "url": "https://github.com/positivesooch/day-alpha/releases/download/v2.5.0/DayTraderBot-Setup-2.5.0.exe",
-    "file": "DayTraderBot-Setup-2.5.0.exe",
-    "sha256": "47343456af7c4aa07a4bb7f2e8fdafd1cd3c2af05d8264290529ed8b725810f2",
-    "size": 18646106
+    "url": "https://github.com/positivesooch/day-alpha/releases/download/v2.5.1/DayTraderBot-Setup-2.5.1.exe",
+    "file": "DayTraderBot-Setup-2.5.1.exe",
+    "sha256": "6d49c569ecf9186990b72fd31ce0ec5761156525561164f3891f8bce381d7ddb",
+    "size": 18648224
   },
-  "notes": "- Login with a code. Day Trader Code is a separate window (Start menu, or\n  gui.py --codegen) that shows a random code for 15 minutes. Day Trader Bot\n  asks for that code before it opens. The code is not a broker password.\n- Currencies. The market list adds forex: majors (EURUSD, GBPUSD, USDJPY and\n  the rest), crosses, and a few other pairs. The sim and MetaTrader 5 watch\n  the pairs. Alpaca watches the currency ETFs (FXE, FXY, UUP).\n- Change symbol is a dropdown on the Bot, Market and Trade tabs. The market\n  list fills the empty space under the buttons. FLATTEN ALL still closes\n  everything."
+  "notes": "- The login code opens the bot. Day Trader Bot and Day Trader Code now share\n  one file, `%USERPROFILE%\\DayTraderBot\\trader\\state\\access.json`, even when\n  the two windows were started from different folders. The code is 6 digits\n  and lasts 12 hours. The Open screen has a button that opens Day Trader Code.\n  FLATTEN ALL still closes everything."
 }
