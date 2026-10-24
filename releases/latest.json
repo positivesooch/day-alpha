@@ -1,12 +1,12 @@
 {
   "name": "Day Trader Bot",
-  "version": "2.4.9",
-  "published": "2026-10-23",
+  "version": "2.5.0",
+  "published": "2026-10-24",
   "installer": {
-    "url": "https://github.com/positivesooch/day-alpha/releases/download/v2.4.9/DayTraderBot-Setup-2.4.9.exe",
-    "file": "DayTraderBot-Setup-2.4.9.exe",
-    "sha256": "09390b14796d4c5683c7d29c04cd588ccc94997490493e8869eef38d8964644d",
-    "size": 18627111
+    "url": "https://github.com/positivesooch/day-alpha/releases/download/v2.5.0/DayTraderBot-Setup-2.5.0.exe",
+    "file": "DayTraderBot-Setup-2.5.0.exe",
+    "sha256": "47343456af7c4aa07a4bb7f2e8fdafd1cd3c2af05d8264290529ed8b725810f2",
+    "size": 18646106
   },
-  "notes": "- The window stays open when trader\\state\\bot.json is damaged. The installed\n  app has no console, so the repair note no longer crashes the window.\n  Readable trades are kept. FLATTEN ALL still closes everything."
+  "notes": "- Login with a code. Day Trader Code is a separate window (Start menu, or\n  gui.py --codegen) that shows a random code for 15 minutes. Day Trader Bot\n  asks for that code before it opens. The code is not a broker password.\n- Currencies. The market list adds forex: majors (EURUSD, GBPUSD, USDJPY and\n  the rest), crosses, and a few other pairs. The sim and MetaTrader 5 watch\n  the pairs. Alpaca watches the currency ETFs (FXE, FXY, UUP).\n- Change symbol is a dropdown on the Bot, Market and Trade tabs. The market\n  list fills the empty space under the buttons. FLATTEN ALL still closes\n  everything."
 }
