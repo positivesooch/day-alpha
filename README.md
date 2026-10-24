@@ -313,9 +313,10 @@ desktop icon and an optional PATH entry. Your settings and logs live in
 `%USERPROFILE%\DayTraderBot\trader\`, and uninstalling leaves them alone.
 
 **`Day Trader Code` is a separate window.** The Start menu item, or
-`python3 trader-bot/gui.py --codegen`, shows a random code for 15 minutes.
-Day Trader Bot asks for that code before the desk opens. It is not a broker
-password, and it stays in your DayTraderBot folder.
+`python3 trader-bot/gui.py --codegen`, shows a random 6-digit code for 12
+hours. Day Trader Bot asks for that code before the desk opens. It is not a
+broker password. Both windows share
+`%USERPROFILE%\DayTraderBot\trader\state\access.json`.
 
 **`DayTraderBot.exe` is the window.** Type the code from Day Trader Code, then
 type the symbols or pick one from Change symbol. Pick the mode

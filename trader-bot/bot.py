@@ -39,7 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.5.0"
+VERSION = "2.5.1"
 
 # Frozen (the Windows build made by installer/DayTraderBot.spec): the pack's
 # folders are bundled under <bundle>/pack, and the exe itself is the Python

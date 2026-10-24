@@ -1,9 +1,11 @@
 """The code that opens Day Trader Bot.
 
-Day Trader Code (a separate window) writes a random code into
-trader/state/access.json. The bot asks for that code before it shows the
-desk. The code is not a broker password and it is not sent anywhere.
-It expires after 15 minutes. Standard library only. Python 3.8.
+Day Trader Code writes a random 6-digit code into trader/state/access.json.
+The bot and the code window are often started from different folders, so the
+code is saved in the bot's data folder (%USERPROFILE%\\DayTraderBot on
+Windows) and the bot accepts a matching code from any folder it might have
+used. The code is not a broker password and it is not sent anywhere. It
+expires after 12 hours. Standard library only. Python 3.8.
 """
 
 import datetime
@@ -11,15 +13,66 @@ import hmac
 import json
 import os
 import secrets
+import sys
 import tempfile
 
-ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+ALPHABET = "0123456789"
 LENGTH = 6
-TTL_SECONDS = 15 * 60
+TTL_SECONDS = 12 * 60 * 60
+
+# Tests append extra folders here so a code saved in one place is accepted
+# when the other window looks somewhere else.
+_EXTRA = []
+
+
+def user_data_home():
+    """The installed app's data folder. Both windows share the code here."""
+    env = os.environ.get("DAYTRADERBOT_HOME")
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    if os.name == "nt":
+        profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    else:
+        profile = os.path.expanduser("~")
+    return os.path.join(profile, "DayTraderBot")
 
 
 def code_path(home):
     return os.path.join(home, "trader", "state", "access.json")
+
+
+def _add(homes, path):
+    if not path:
+        return
+    path = os.path.abspath(os.path.expanduser(path))
+    if path not in homes:
+        homes.append(path)
+
+
+def write_homes(preferred=None):
+    """Where a new code is saved. The user data folder is always included."""
+    homes = []
+    _add(homes, preferred)
+    _add(homes, user_data_home())
+    for path in _EXTRA:
+        _add(homes, path)
+    return homes
+
+
+def search_homes(preferred=None):
+    """Where the bot looks. Includes older locations from 2.5.0."""
+    homes = write_homes(preferred)
+    try:
+        _add(homes, os.getcwd())
+    except OSError:
+        pass
+    if getattr(sys, "frozen", False):
+        _add(homes, os.path.dirname(os.path.abspath(sys.executable)))
+    return homes
+
+
+def normalize(text):
+    return "".join(ch for ch in str(text or "").upper() if ch.isalnum())
 
 
 def _now(now):
@@ -53,11 +106,7 @@ def read(home):
     return doc
 
 
-def issue(home, now=None):
-    """A new random code, saved under home. Returns the document."""
-    when = _now(now)
-    doc = {"code": "".join(secrets.choice(ALPHABET) for _ in range(LENGTH)),
-           "created": _stamp(when), "ttl_seconds": TTL_SECONDS}
+def _write(home, doc):
     path = code_path(home)
     folder = os.path.dirname(path)
     if folder:
@@ -78,6 +127,32 @@ def issue(home, now=None):
     return doc
 
 
+def issue(home, now=None):
+    """A new random code, saved under home only. Returns the document."""
+    when = _now(now)
+    doc = {"code": "".join(secrets.choice(ALPHABET) for _ in range(LENGTH)),
+           "created": _stamp(when), "ttl_seconds": TTL_SECONDS}
+    return _write(home, doc)
+
+
+def publish(preferred=None, now=None):
+    """One new code, saved in every folder either window might read."""
+    when = _now(now)
+    doc = {"code": "".join(secrets.choice(ALPHABET) for _ in range(LENGTH)),
+           "created": _stamp(when), "ttl_seconds": TTL_SECONDS}
+    saved = 0
+    last = None
+    for home in write_homes(preferred):
+        try:
+            _write(home, doc)
+            saved += 1
+        except OSError as exc:
+            last = exc
+    if not saved:
+        raise last or OSError("could not save the code")
+    return doc
+
+
 def status(home, now=None):
     """(doc or None, seconds left). seconds left is 0 when missing or expired."""
     doc = read(home)
@@ -87,19 +162,42 @@ def status(home, now=None):
     created = _parse(doc.get("created"))
     if created is None:
         return None, 0
-    left = TTL_SECONDS - int((when - created).total_seconds())
+    ttl = int(doc.get("ttl_seconds") or TTL_SECONDS)
+    left = ttl - int((when - created).total_seconds())
     if left <= 0:
         return doc, 0
     return doc, left
 
 
+def current(preferred=None, now=None):
+    """The live code with the most time left, from any folder either window uses."""
+    best, best_left = None, 0
+    for home in search_homes(preferred):
+        doc, left = status(home, now)
+        if doc and left > best_left:
+            best, best_left = doc, left
+    return best, best_left
+
+
 def check(home, typed, now=None):
-    """(True, "") when typed is the current code. Otherwise (False, reason)."""
-    doc, left = status(home, now)
-    if not doc or left <= 0:
+    """(True, "") when typed is a current code in any shared folder."""
+    got = normalize(typed)
+    found = False
+    expired = False
+    for folder in search_homes(home):
+        doc, left = status(folder, now)
+        if not doc:
+            continue
+        found = True
+        code = normalize(doc.get("code"))
+        if got and code and len(got) == len(code) and hmac.compare_digest(got, code):
+            if left > 0:
+                return True, ""
+            expired = True
+    if not found:
         return False, "No current code. Open Day Trader Code and press Generate."
-    got = "".join(ch for ch in (typed or "").upper() if ch.isalnum())
-    code = str(doc.get("code") or "")
-    if len(got) != len(code) or not hmac.compare_digest(got, code):
-        return False, "That code does not match. Use the code Day Trader Code is showing."
-    return True, ""
+    if expired:
+        return False, "That code has expired. Press Generate in Day Trader Code."
+    if not got:
+        return False, "Type the code Day Trader Code is showing."
+    return False, "That code does not match. Use the code Day Trader Code is showing."

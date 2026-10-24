@@ -1475,17 +1475,39 @@ class AccessCode(unittest.TestCase):
             start = datetime.datetime(2026, 10, 24, 12, 0, tzinfo=datetime.timezone.utc)
             doc = access.issue(d, now=start)
             self.assertEqual(len(doc["code"]), 6)
-            self.assertTrue(doc["code"].isalnum())
-            ok, msg = access.check(d, doc["code"].lower(), now=start)
+            self.assertTrue(doc["code"].isdigit())
+            ok, msg = access.check(d, " %s " % doc["code"], now=start)
             self.assertTrue(ok, msg)
             ok, msg = access.check(d, "AAAAAA", now=start)
             self.assertFalse(ok)
-            later = start + datetime.timedelta(minutes=16)
+            self.assertIn("does not match", msg)
+            later = start + datetime.timedelta(seconds=access.TTL_SECONDS + 60)
             ok, msg = access.check(d, doc["code"], now=later)
             self.assertFalse(ok)
-            self.assertIn("No current code", msg)
+            self.assertIn("expired", msg)
         finally:
             shutil.rmtree(d, ignore_errors=True)
+
+    def test_a_code_saved_in_one_folder_opens_the_bot_in_another(self):
+        import access
+        saved = access.user_data_home
+        bot_home = tempfile.mkdtemp(prefix="bot-code-bot-")
+        code_home = tempfile.mkdtemp(prefix="bot-code-gen-")
+        try:
+            access.user_data_home = lambda: code_home
+            doc = access.publish(bot_home)
+            self.assertEqual(access.read(bot_home)["code"], doc["code"])
+            self.assertEqual(access.read(code_home)["code"], doc["code"])
+            other = tempfile.mkdtemp(prefix="bot-code-other-")
+            try:
+                ok, msg = access.check(other, doc["code"])
+                self.assertTrue(ok, msg)
+            finally:
+                shutil.rmtree(other, ignore_errors=True)
+        finally:
+            access.user_data_home = saved
+            shutil.rmtree(bot_home, ignore_errors=True)
+            shutil.rmtree(code_home, ignore_errors=True)
 
 
 class Desk(unittest.TestCase):

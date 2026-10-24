@@ -431,21 +431,40 @@ class App(object):
         card.place(relx=0.5, rely=0.5, anchor="center")
         tk.Label(card, text="Open Day Trader Bot", background="#ffffff",
                  font=("TkDefaultFont", 16, "bold")).pack()
-        tk.Label(card, text="Open Day Trader Code and type the code it shows.\n"
+        tk.Label(card, text="Open Day Trader Code, press Generate, and type the 6 digits.\n"
                             "That code is not your broker password.",
-                 background="#ffffff", justify="center").pack(pady=(8, 12))
+                 background="#ffffff", justify="center", wraplength=380).pack(pady=(8, 12))
         self.code_var = tk.StringVar()
         self.code_entry = tk.Entry(card, textvariable=self.code_var, width=12, justify="center",
                                    font=("TkFixedFont", 18))
         self.code_entry.pack()
         self.code_entry.bind("<Return>", lambda e: self._try_unlock())
         self.code_msg = tk.StringVar()
-        tk.Label(card, textvariable=self.code_msg, background="#ffffff", fg="#b00020").pack(pady=(8, 0))
-        ttk.Button(card, text="Open", command=self._try_unlock).pack(pady=(10, 0))
+        tk.Label(card, textvariable=self.code_msg, background="#ffffff", fg="#b00020",
+                 wraplength=380, justify="center").pack(pady=(8, 0))
+        row = ttk.Frame(card)
+        row.pack(pady=(10, 0))
+        ttk.Button(row, text="Open", command=self._try_unlock).pack(side="left", padx=(0, 8))
+        ttk.Button(row, text="Open Day Trader Code", command=self._launch_codegen).pack(side="left")
+        tk.Label(card, text=access.code_path(access.user_data_home()), background="#ffffff",
+                 fg="#666", wraplength=380, justify="center").pack(pady=(8, 0))
         self.code_entry.focus_set()
 
+    def _launch_codegen(self):
+        """Open Day Trader Code against the same data folder this window reads."""
+        target = access.user_data_home()
+        if FROZEN:
+            argv = [sys.executable, "--codegen", "--dir", target]
+        else:
+            argv = [sys.executable, os.path.join(HERE, "gui.py"), "--codegen", "--dir", target]
+        try:
+            subprocess.Popen(argv)
+        except OSError as exc:
+            self.code_msg.set("Could not open Day Trader Code: %s" % exc)
+
     def _try_unlock(self):
-        ok, msg = access.check(self.home, self.code_var.get())
+        typed = self.code_entry.get() if self.code_entry else self.code_var.get()
+        ok, msg = access.check(self.home, typed)
         self.code_msg.set("" if ok else msg)
         if not ok:
             return

@@ -4,6 +4,14 @@ The installed app reads the newest entry's notes from `releases/latest.json`
 and shows them next to its "Update to ..." button. Keep the newest version at
 the top, one `## <version> (<date>)` heading per release.
 
+## 2.5.1 (2026-10-24)
+
+- The login code opens the bot. Day Trader Bot and Day Trader Code now share
+  one file, `%USERPROFILE%\DayTraderBot\trader\state\access.json`, even when
+  the two windows were started from different folders. The code is 6 digits
+  and lasts 12 hours. The Open screen has a button that opens Day Trader Code.
+  FLATTEN ALL still closes everything.
+
 ## 2.5.0 (2026-10-24)
 
 - Login with a code. Day Trader Code is a separate window (Start menu, or
