@@ -4,6 +4,18 @@ The installed app reads the newest entry's notes from `releases/latest.json`
 and shows them next to its "Update to ..." button. Keep the newest version at
 the top, one `## <version> (<date>)` heading per release.
 
+## 2.5.0 (2026-10-24)
+
+- Login with a code. Day Trader Code is a separate window (Start menu, or
+  gui.py --codegen) that shows a random code for 15 minutes. Day Trader Bot
+  asks for that code before it opens. The code is not a broker password.
+- Currencies. The market list adds forex: majors (EURUSD, GBPUSD, USDJPY and
+  the rest), crosses, and a few other pairs. The sim and MetaTrader 5 watch
+  the pairs. Alpaca watches the currency ETFs (FXE, FXY, UUP).
+- Change symbol is a dropdown on the Bot, Market and Trade tabs. The market
+  list fills the empty space under the buttons. FLATTEN ALL still closes
+  everything.
+
 ## 2.4.9 (2026-10-23)
 
 - The window stays open when trader\state\bot.json is damaged. The installed

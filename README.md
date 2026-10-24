@@ -312,7 +312,13 @@ reel day", "run today (dry-run)", your data folder, the README), an optional
 desktop icon and an optional PATH entry. Your settings and logs live in
 `%USERPROFILE%\DayTraderBot\trader\`, and uninstalling leaves them alone.
 
-**`DayTraderBot.exe` is the window.** Type the symbols, pick the mode
+**`Day Trader Code` is a separate window.** The Start menu item, or
+`python3 trader-bot/gui.py --codegen`, shows a random code for 15 minutes.
+Day Trader Bot asks for that code before the desk opens. It is not a broker
+password, and it stays in your DayTraderBot folder.
+
+**`DayTraderBot.exe` is the window.** Type the code from Day Trader Code, then
+type the symbols or pick one from Change symbol. Pick the mode
 (dry-run, confirm, auto) and the broker (sim, alpaca, mt5), tick the scanner if
 you want it, then Replay the reel day, Run today, or Status. The log pane
 streams what the bot does, green for PASS and fills, red for BLOCK and

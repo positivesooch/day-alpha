@@ -1,11 +1,13 @@
-"""Stocks by sector, and commodities, for the window's market list.
+"""Stocks by sector, commodities, and forex, for the window's market list.
 
 US common stocks in each group are the liquid names of that type. They trade
 on Alpaca and on a MetaTrader 5 stock-CFD account. Commodity groups list the
 ETFs a stock broker can buy (GLD for gold, USO for oil) and, separately, the
 futures Yahoo charts and the names most MetaTrader 5 brokers use (XAUUSD,
-USOIL). Alpaca does not list those futures; the window adds them only for the
-sim and for MetaTrader 5.
+USOIL). Forex groups list currency ETFs a stock broker can buy, and the spot
+pairs Yahoo charts as EURUSD=X and MetaTrader 5 lists as EURUSD. Alpaca does
+not list those futures or spot pairs; the window adds them only for the sim
+and for MetaTrader 5.
 
 The full US common-stock list is not in this file. `scan.py universe` downloads
 it from Nasdaq Trader. The window's "All US common stocks" button does that.
@@ -57,7 +59,26 @@ GROUPS = [
      "mt5": {"LE=F": "CATTLE", "HE=F": "HOGS"}},
     {"id": "commodity-baskets", "kind": "commodity", "name": "Commodity baskets",
      "symbols": ["DBC", "DBA", "GSG"]},
+    {"id": "fx-majors", "kind": "forex", "name": "Major currencies",
+     "symbols": ["UUP", "FXE", "FXB", "FXY", "FXF", "FXA", "FXC"],
+     "forex": ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "USDCHF=X", "AUDUSD=X", "NZDUSD=X", "USDCAD=X"],
+     "mt5": {"EURUSD=X": "EURUSD", "GBPUSD=X": "GBPUSD", "USDJPY=X": "USDJPY", "USDCHF=X": "USDCHF",
+             "AUDUSD=X": "AUDUSD", "NZDUSD=X": "NZDUSD", "USDCAD=X": "USDCAD"}},
+    {"id": "fx-crosses", "kind": "forex", "name": "Currency crosses",
+     "symbols": ["FXE", "FXB", "FXY"],
+     "forex": ["EURGBP=X", "EURJPY=X", "GBPJPY=X", "AUDJPY=X", "EURAUD=X", "EURCHF=X", "GBPCHF=X", "GBPAUD=X"],
+     "mt5": {"EURGBP=X": "EURGBP", "EURJPY=X": "EURJPY", "GBPJPY=X": "GBPJPY", "AUDJPY=X": "AUDJPY",
+             "EURAUD=X": "EURAUD", "EURCHF=X": "EURCHF", "GBPCHF=X": "GBPCHF", "GBPAUD=X": "GBPAUD"}},
+    {"id": "fx-others", "kind": "forex", "name": "Other currencies",
+     "symbols": ["CEW"],
+     "forex": ["USDZAR=X", "USDMXN=X", "USDSEK=X", "USDNOK=X", "USDTRY=X"],
+     "mt5": {"USDZAR=X": "USDZAR", "USDMXN=X": "USDMXN", "USDSEK=X": "USDSEK", "USDNOK=X": "USDNOK",
+             "USDTRY=X": "USDTRY"}},
 ]
+
+
+def kind_label(kind):
+    return {"stock": "stocks", "commodity": "commodities", "forex": "forex"}.get(kind, kind)
 
 
 def by_id(group_id):
@@ -87,9 +108,14 @@ def pick(group_ids, futures=False):
         for sym in g["symbols"]:
             add(sym)
         if futures:
-            for sym in g.get("futures") or []:
+            for sym in (g.get("futures") or []) + (g.get("forex") or []):
                 add(sym)
     return chosen
+
+
+def catalog():
+    """Every stock, commodity, future and forex pair the symbol dropdown can switch to."""
+    return pick(ids_of(), futures=True)
 
 
 def mt5_map(group_ids):

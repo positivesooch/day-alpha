@@ -1400,12 +1400,16 @@ class Markets(unittest.TestCase):
         self.assertIn("Energy commodities", kinds["commodity"])
         self.assertIn("Agriculture", kinds["commodity"])
         self.assertIn("Livestock", kinds["commodity"])
+        self.assertIn("Major currencies", kinds["forex"])
+        self.assertIn("Currency crosses", kinds["forex"])
         both = markets.pick(markets.ids_of(), futures=False)
         self.assertIn("TSLA", both)
         self.assertIn("GLD", both)
         self.assertIn("USO", both)
         self.assertIn("CORN", both)
         self.assertNotIn("GC=F", both)
+        self.assertNotIn("EURUSD=X", both)
+        self.assertIn("FXE", both)
         with_futures = markets.pick(["metals", "energy-commodity", "agriculture"], futures=True)
         self.assertIn("GC=F", with_futures)
         self.assertIn("CL=F", with_futures)
@@ -1413,6 +1417,11 @@ class Markets(unittest.TestCase):
         self.assertEqual(markets.mt5_map(["metals", "energy-commodity"]),
                          {"GC=F": "XAUUSD", "SI=F": "XAGUSD", "PL=F": "XPTUSD", "PA=F": "XPDUSD", "HG=F": "XCUUSD",
                           "CL=F": "USOIL", "BZ=F": "UKOIL", "NG=F": "NATGAS"})
+        self.assertEqual(markets.mt5_map(["fx-majors"])["EURUSD=X"], "EURUSD")
+        pairs = markets.pick(["fx-majors"], futures=True)
+        self.assertIn("EURUSD=X", pairs)
+        self.assertIn("GBPUSD=X", pairs)
+        self.assertIn("EURUSD=X", markets.catalog())
         self.assertEqual(len(both), len(set(both)))
 
     def test_the_window_lists_the_groups(self):
@@ -1429,6 +1438,22 @@ class Markets(unittest.TestCase):
             root.withdraw()
             app = g.App(root, home=d)
             self.assertGreaterEqual(app.market_list.size(), 16)
+            self.assertEqual(app.lock.winfo_manager(), "place")
+            app.code_var.set("NOPE")
+            app._try_unlock()
+            self.assertTrue(app.locked)
+            import access
+            code = access.issue(d)["code"]
+            app.code_var.set(code.lower())
+            app._try_unlock()
+            self.assertFalse(app.locked)
+            self.assertEqual(app.lock.winfo_manager(), "")
+            self.assertIn("EURUSD=X", app.symbol_pick.cget("values"))
+            app.chart_symbol.set("EURUSD=X")
+            app._symbol_picked()
+            self.assertEqual(app.trade_symbol.get(), "EURUSD=X")
+            self.assertIn("EURUSD=X", app.symbols_var.get())
+            self.assertIn("EURUSD=X", app.chart_symbol_box.cget("values"))
             app.broker_var.set("alpaca")
             app.apply_markets(["discretionary", "metals"])
             self.assertIn("TSLA", app.symbols_var.get())
@@ -1436,6 +1461,30 @@ class Markets(unittest.TestCase):
             self.assertNotIn("GC=F", app.symbols_var.get())
         finally:
             root.destroy()
+            shutil.rmtree(d, ignore_errors=True)
+
+
+class AccessCode(unittest.TestCase):
+    def test_a_code_matches_once_and_then_expires(self):
+        import access
+        d = tempfile.mkdtemp(prefix="bot-code-")
+        try:
+            ok, msg = access.check(d, "ABCDEF")
+            self.assertFalse(ok)
+            self.assertIn("No current code", msg)
+            start = datetime.datetime(2026, 10, 24, 12, 0, tzinfo=datetime.timezone.utc)
+            doc = access.issue(d, now=start)
+            self.assertEqual(len(doc["code"]), 6)
+            self.assertTrue(doc["code"].isalnum())
+            ok, msg = access.check(d, doc["code"].lower(), now=start)
+            self.assertTrue(ok, msg)
+            ok, msg = access.check(d, "AAAAAA", now=start)
+            self.assertFalse(ok)
+            later = start + datetime.timedelta(minutes=16)
+            ok, msg = access.check(d, doc["code"], now=later)
+            self.assertFalse(ok)
+            self.assertIn("No current code", msg)
+        finally:
             shutil.rmtree(d, ignore_errors=True)
 
 

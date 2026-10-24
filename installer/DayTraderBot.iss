@@ -1,6 +1,6 @@
 ; Inno Setup 6 script for Day Trader Bot.
 ;
-;   ISCC.exe /DMyAppVersion=2.4.9 installer\DayTraderBot.iss
+;   ISCC.exe /DMyAppVersion=2.5.0 installer\DayTraderBot.iss
 ;
 ; Expects the PyInstaller output in dist\DayTraderBot\ (see build.ps1).
 ; Writes installer\Output\DayTraderBot-Setup-<version>.exe.
@@ -13,7 +13,7 @@
 ; the uninstaller leaves it alone.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "2.4.9"
+  #define MyAppVersion "2.5.0"
 #endif
 #define MyAppName "Day Trader Bot"
 #define MyAppPublisher "Day Trader skill"
@@ -59,6 +59,7 @@ Source: "{#DistDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs cr
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Comment: "The window: replay, run, status"
+Name: "{group}\Day Trader Code"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--codegen"; Comment: "The separate window that makes the code which opens Day Trader Bot"
 Name: "{group}\{#MyAppName} - console menu"; Filename: "{app}\{#MyCliExeName}"; Comment: "The same, as a console menu"
 Name: "{group}\{#MyAppName} - replay the reel day"; Filename: "{app}\{#MyCliExeName}"; Parameters: "--pause replay --fixtures --fresh --mode auto"; Comment: "TSLA, Monday 2026-10-19, on the paper sim"
 Name: "{group}\{#MyAppName} - run today (dry-run)"; Filename: "{app}\{#MyCliExeName}"; Parameters: "--pause run"; Comment: "Watch today's session, place nothing"

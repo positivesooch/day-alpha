@@ -35,8 +35,9 @@ FROZEN = bool(getattr(sys, "frozen", False))
 BUNDLE = getattr(sys, "_MEIPASS", None) or (os.path.dirname(sys.executable) if FROZEN else None)
 PACK_BOT = os.path.join(BUNDLE, "pack", "trader-bot") if FROZEN else HERE
 sys.path.insert(0, PACK_BOT)
+import access  # noqa: E402  (the code Day Trader Code writes, which this window asks for)
 import bot  # noqa: E402  (the same module the console runs)
-import markets  # noqa: E402  (stock sectors and commodities)
+import markets  # noqa: E402  (stock sectors, commodities and forex)
 import tape  # noqa: E402  (live quotes and the candle layout)
 import update as updater  # noqa: E402
 
@@ -288,13 +289,13 @@ class App(object):
         self._build()
         self._refresh_header()
         self.append("Day Trader Bot %s. Education and tooling, not financial advice. Most people who day trade "
-                    "lose money.\nData folder: %s\n\nMarket: a live candle chart and last prices from Yahoo "
-                    "Finance. It follows the symbols you type or pick, and draws the entry, stop and target "
-                    "of a position after Connect. Bot: replay a recorded day, or run today. Trade: live "
-                    "positions, and the history of each closed trade with its profit or loss. FLATTEN ALL closes everything "
-                    "and stops new entries for the day. Broker: Alpaca keys or a MetaTrader 5 login. Settings: "
-                    "your limits, and the switch from paper to a live account (that switch asks you to type "
-                    "%s).\n\n" % (VERSION, self.home, bot.LIVE_PHRASE))
+                    "lose money.\nData folder: %s\n\nOpen this window with the code from Day Trader Code "
+                    "(Start menu, or gui.py --codegen). Market: a live candle chart. Change symbol switches "
+                    "the chart and the order ticket. The list covers stocks, commodities and currencies "
+                    "(EURUSD and the other pairs). Trade: live positions and closed-trade profit or loss. "
+                    "FLATTEN ALL closes everything and stops new entries for the day. Broker: Alpaca keys or "
+                    "a MetaTrader 5 login. Settings: your limits, and the switch from paper to a live account "
+                    "(that switch asks you to type %s).\n\n" % (VERSION, self.home, bot.LIVE_PHRASE))
         root.after(100, self._drain)
         self.update_info = None
         self.update_busy = False
@@ -350,22 +351,28 @@ class App(object):
         form.pack(fill="x", padx=8, pady=6)
         ttk.Label(form, text="Symbols").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         self.symbols_var = tk.StringVar(value=self._symbols_from_config())
-        ttk.Entry(form, textvariable=self.symbols_var, width=36).grid(row=0, column=1, sticky="we", padx=6)
+        self.chart_symbol = tk.StringVar(value=self._first_symbol())
+        self.trade_symbol = tk.StringVar(value=self.chart_symbol.get())
+        ttk.Entry(form, textvariable=self.symbols_var, width=28).grid(row=0, column=1, sticky="we", padx=6)
+        ttk.Label(form, text="Change symbol").grid(row=0, column=2, sticky="e", padx=6)
+        self.symbol_pick = ttk.Combobox(form, textvariable=self.chart_symbol, state="readonly", width=14)
+        self.symbol_pick.grid(row=0, column=3, sticky="w", padx=6)
+        self.symbol_pick.bind("<<ComboboxSelected>>", self._symbol_picked)
         self.scan_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(form, text="let the scanner add opening-range breakouts",
-                        variable=self.scan_var).grid(row=0, column=2, columnspan=2, sticky="w", padx=6)
-        ttk.Label(form, text="Mode").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+                        variable=self.scan_var).grid(row=1, column=0, columnspan=4, sticky="w", padx=6)
+        ttk.Label(form, text="Mode").grid(row=2, column=0, sticky="w", padx=6, pady=4)
         self.mode_var = tk.StringVar(value="dry-run")
         mode = ttk.Combobox(form, textvariable=self.mode_var, values=MODES, state="readonly", width=12)
-        mode.grid(row=1, column=1, sticky="w", padx=6)
+        mode.grid(row=2, column=1, sticky="w", padx=6)
         mode.bind("<<ComboboxSelected>>", lambda e: self._explain_mode())
-        ttk.Label(form, text="Broker").grid(row=1, column=2, sticky="e", padx=6)
+        ttk.Label(form, text="Broker").grid(row=2, column=2, sticky="e", padx=6)
         self.broker_var = tk.StringVar(value="sim")
         broker = ttk.Combobox(form, textvariable=self.broker_var, values=BROKERS, state="readonly", width=10)
-        broker.grid(row=1, column=3, sticky="w", padx=6)
+        broker.grid(row=2, column=3, sticky="w", padx=6)
         broker.bind("<<ComboboxSelected>>", lambda e: self._explain_mode())
         self.mode_help = tk.StringVar()
-        ttk.Label(form, textvariable=self.mode_help, foreground="#555").grid(row=2, column=0, columnspan=4,
+        ttk.Label(form, textvariable=self.mode_help, foreground="#555").grid(row=3, column=0, columnspan=4,
                                                                              sticky="w", padx=6, pady=(0, 6))
         form.columnconfigure(1, weight=1)
         self._explain_mode()
@@ -411,16 +418,50 @@ class App(object):
 
         self.status_var = tk.StringVar(value="idle")
         ttk.Label(r, textvariable=self.status_var, anchor="w", relief="sunken").pack(fill="x", side="bottom")
+        self._build_lock()
+
+    def _build_lock(self):
+        """Cover the desk until the code from Day Trader Code is typed."""
+        self.locked = True
+        self.lock = tk.Frame(self.root, background="#e8edf2")
+        self.lock.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.lock.lift()
+        card = tk.Frame(self.lock, background="#ffffff", padx=28, pady=22,
+                        highlightthickness=1, highlightbackground="#c5ced6")
+        card.place(relx=0.5, rely=0.5, anchor="center")
+        tk.Label(card, text="Open Day Trader Bot", background="#ffffff",
+                 font=("TkDefaultFont", 16, "bold")).pack()
+        tk.Label(card, text="Open Day Trader Code and type the code it shows.\n"
+                            "That code is not your broker password.",
+                 background="#ffffff", justify="center").pack(pady=(8, 12))
+        self.code_var = tk.StringVar()
+        self.code_entry = tk.Entry(card, textvariable=self.code_var, width=12, justify="center",
+                                   font=("TkFixedFont", 18))
+        self.code_entry.pack()
+        self.code_entry.bind("<Return>", lambda e: self._try_unlock())
+        self.code_msg = tk.StringVar()
+        tk.Label(card, textvariable=self.code_msg, background="#ffffff", fg="#b00020").pack(pady=(8, 0))
+        ttk.Button(card, text="Open", command=self._try_unlock).pack(pady=(10, 0))
+        self.code_entry.focus_set()
+
+    def _try_unlock(self):
+        ok, msg = access.check(self.home, self.code_var.get())
+        self.code_msg.set("" if ok else msg)
+        if not ok:
+            return
+        self.locked = False
+        self.lock.place_forget()
+        self.append("Opened with the code from Day Trader Code.\n", "good")
 
     def _build_markets(self, tab):
-        box = ttk.LabelFrame(tab, text="Stocks and commodities. Pick types, then watch them. "
-                                        "Futures (gold, oil, corn) are added for the sim and MetaTrader 5; "
-                                        "Alpaca watches the ETFs (GLD, USO, CORN).")
-        box.pack(fill="x", padx=8, pady=(0, 6))
-        self.market_list = tk.Listbox(box, selectmode="extended", height=6, exportselection=False)
+        box = ttk.LabelFrame(tab, text="Stocks, commodities and currencies. Pick types, then watch them. "
+                                        "Futures and forex pairs are added for the sim and MetaTrader 5. "
+                                        "Alpaca watches the ETFs (GLD, USO, FXE).")
+        box.pack(fill="both", expand=True, padx=8, pady=(0, 6))
+        self.market_list = tk.Listbox(box, selectmode="extended", height=8, exportselection=False)
         for g in markets.GROUPS:
-            self.market_list.insert("end", "%s (%s)" % (g["name"], "stocks" if g["kind"] == "stock" else "commodities"))
-        self.market_list.pack(fill="x", padx=6, pady=4)
+            self.market_list.insert("end", "%s (%s)" % (g["name"], markets.kind_label(g["kind"])))
+        self.market_list.pack(fill="both", expand=True, padx=6, pady=4)
         row = ttk.Frame(box)
         row.pack(fill="x", padx=6, pady=(0, 6))
         ttk.Button(row, text="Watch selected", command=self.apply_markets).pack(side="left")
@@ -428,8 +469,8 @@ class App(object):
             side="left", padx=6)
         ttk.Button(row, text="All commodities", command=lambda: self.apply_markets(markets.ids_of("commodity"))).pack(
             side="left")
-        ttk.Button(row, text="Stocks and commodities",
-                   command=lambda: self.apply_markets(markets.ids_of())).pack(side="left", padx=6)
+        ttk.Button(row, text="All forex", command=lambda: self.apply_markets(markets.ids_of("forex"))).pack(
+            side="left", padx=6)
         ttk.Button(row, text="All US common stocks", command=self.watch_all_us_stocks).pack(side="left")
 
     def apply_markets(self, group_ids=None):
@@ -450,8 +491,8 @@ class App(object):
             current.update((cfg.get("mt5") or {}).get("symbols") or {})
             current.update(mapping)
             self.desk(["settings", "--dir", self.home, "--set", "bot.mt5.symbols=%s" % json.dumps(current)])
-        self.append("Watching %d symbols (%s).\n" % (
-            len(syms), "stocks, commodity ETFs, and futures" if futures else "stocks and commodity ETFs"), "prompt")
+        self.append("Watching %d symbols%s.\n" % (
+            len(syms), ", including forex pairs" if any("=" in s and s.endswith("X") for s in syms) else ""), "prompt")
 
     def watch_all_us_stocks(self):
         """Turn the scanner onto Nasdaq Trader's common-stock list, and download that list if it is missing."""
@@ -492,10 +533,9 @@ class App(object):
         top = ttk.Frame(tab)
         top.pack(fill="x", padx=8, pady=6)
         ttk.Label(top, text="Symbol").pack(side="left")
-        self.chart_symbol = tk.StringVar(value=self._first_symbol())
-        self.chart_symbol_box = ttk.Combobox(top, textvariable=self.chart_symbol, width=12)
+        self.chart_symbol_box = ttk.Combobox(top, textvariable=self.chart_symbol, state="readonly", width=14)
         self.chart_symbol_box.pack(side="left", padx=6)
-        self.chart_symbol_box.bind("<<ComboboxSelected>>", lambda e: self.refresh_tape(now=True))
+        self.chart_symbol_box.bind("<<ComboboxSelected>>", self._symbol_picked)
         ttk.Label(top, text="Candles").pack(side="left")
         self.chart_interval = tk.StringVar(value="5m")
         interval = ttk.Combobox(top, textvariable=self.chart_interval, values=tape.INTERVALS,
@@ -514,7 +554,7 @@ class App(object):
         ttk.Button(top, text="Refresh", command=lambda: self.refresh_tape(now=True)).pack(side="left", padx=8)
         self.quote_var = tk.StringVar(value="Live prices load from Yahoo Finance, the same feed the sim trades on.")
         ttk.Label(tab, textvariable=self.quote_var, wraplength=920).pack(anchor="w", padx=8)
-        self.chart = tk.Canvas(tab, height=300, background="#f4f6f8", highlightthickness=0)
+        self.chart = tk.Canvas(tab, height=280, background="#f4f6f8", highlightthickness=0)
         self.chart.pack(fill="both", expand=True, padx=8, pady=4)
         self.chart.bind("<Configure>", lambda e: self._draw_chart(self._tape_snap) if self._tape_snap else None)
         cols = ("symbol", "last", "change", "state")
@@ -533,22 +573,55 @@ class App(object):
         syms = tape.split_symbols(self.symbols_var.get(), limit=1)
         return syms[0] if syms else "TSLA"
 
-    def _sync_chart_symbols(self):
-        syms = tape.split_symbols(self.symbols_var.get(), limit=8)
+    def _catalog(self):
+        syms = list(markets.catalog())
+        seen = set(syms)
+        for name in tape.split_symbols(self.symbols_var.get(), limit=40):
+            if name not in seen:
+                syms.append(name)
+                seen.add(name)
         current = self.chart_symbol.get().strip().upper()
-        if current and current not in syms:
-            syms = [current] + syms
-        if not syms:
-            syms = ["TSLA"]
-        self.chart_symbol_box.configure(values=tuple(syms[:8]))
+        if current and current not in seen:
+            syms.insert(0, current)
+        return syms or ["TSLA"]
+
+    def _sync_chart_symbols(self):
+        syms = self._catalog()
+        values = tuple(syms)
+        self.chart_symbol_box.configure(values=values)
+        self.symbol_pick.configure(values=values)
+        if getattr(self, "trade_symbol_box", None) is not None:
+            self.trade_symbol_box.configure(values=values)
+
+    def _symbol_picked(self, event=None):
+        """A choice in the symbol dropdown moves the chart and the order ticket onto that name."""
+        sym = self.chart_symbol.get().strip().upper()
+        if not sym:
+            return
+        if self.chart_symbol.get() != sym:
+            self.chart_symbol.set(sym)
+        self.trade_symbol.set(sym)
+        watched = tape.split_symbols(self.symbols_var.get(), limit=40)
+        if sym not in watched:
+            self.symbols_var.set(",".join([sym] + watched))
+        self._sync_chart_symbols()
+        self._tape_soon()
 
     def _symbols_edited(self):
         """A change in the symbol box (typed, or a market-list button) moves the chart onto that list."""
-        syms = tape.split_symbols(self.symbols_var.get(), limit=8)
-        self.chart_symbol_box.configure(values=tuple(syms or ("TSLA",)))
+        syms = tape.split_symbols(self.symbols_var.get(), limit=40)
         if syms and self.chart_symbol.get().strip().upper() not in syms:
             self.chart_symbol.set(syms[0])
+            self.trade_symbol.set(syms[0])
+        self._sync_chart_symbols()
         self._tape_soon()
+
+    def _trade_symbol_picked(self, event=None):
+        sym = self.trade_symbol.get().strip().upper()
+        if not sym:
+            return
+        self.chart_symbol.set(sym)
+        self._symbol_picked()
 
     def _trade_symbol_edited(self):
         sym = self.trade_symbol.get().strip().upper()
@@ -725,7 +798,6 @@ class App(object):
     def _build_trade(self, tab):
         form = ttk.LabelFrame(tab, text="One bracket order (long only). Your limits still size it and can refuse it.")
         form.pack(fill="x", padx=8, pady=6)
-        self.trade_symbol = tk.StringVar(value=self.symbols_var.get().split(",")[0])
         self.trade_qty = tk.StringVar()
         self.trade_entry = tk.StringVar()
         self.trade_stop = tk.StringVar()
@@ -735,7 +807,13 @@ class App(object):
                   ("Stop", self.trade_stop), ("Target", self.trade_target))
         for col, (label, var) in enumerate(fields):
             ttk.Label(form, text=label).grid(row=0, column=col, sticky="w", padx=6, pady=(4, 0))
-            ttk.Entry(form, textvariable=var, width=12).grid(row=1, column=col, sticky="we", padx=6, pady=(0, 6))
+            if label == "Symbol":
+                self.trade_symbol_box = ttk.Combobox(form, textvariable=var, state="readonly", width=12)
+                self.trade_symbol_box.grid(row=1, column=col, sticky="we", padx=6, pady=(0, 6))
+                self.trade_symbol_box.bind("<<ComboboxSelected>>", self._trade_symbol_picked)
+            else:
+                ttk.Entry(form, textvariable=var, width=12).grid(row=1, column=col, sticky="we", padx=6, pady=(0, 6))
+        self._sync_chart_symbols()
         form.columnconfigure(0, weight=1)
         row = ttk.Frame(tab)
         row.pack(fill="x", padx=8)
@@ -1480,8 +1558,13 @@ def main(argv=None):
     _ensure_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
     home = None
-    if argv[:1] == ["--dir"] and len(argv) > 1:
-        home = os.path.abspath(argv[1])
+    if "--dir" in argv:
+        i = argv.index("--dir")
+        if i + 1 < len(argv):
+            home = os.path.abspath(argv[i + 1])
+    if "--codegen" in argv:
+        import codegen
+        return codegen.main(home)
     if tk is None:
         print("Day Trader Bot: tkinter is not installed (python3-tk on Debian/Ubuntu). "
               "The console menu works: bot.py menu", file=sys.stderr)
