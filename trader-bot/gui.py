@@ -48,6 +48,8 @@ BROKERS = ("sim", "alpaca", "mt5")
 PROMPTS = ("Reply yes or no: ", "Enter keeps trader\\bot.json): ", "Choose: ")
 PROMPT_STARTS = ("Press Enter",)
 REEL = ["replay", "--fixtures", "--fresh"]
+# Names that broke out on the recorded day, so Replay shows more than Tesla.
+REEL_SHOW = ("TSLA", "AAPL", "MSFT", "AMZN", "XOM", "LLY", "TJX", "V")
 
 
 def cli_command():
@@ -153,39 +155,45 @@ def _trade_row(symbol, pos, when=""):
             "result": _pnl_result(pnl), "why": pos.get("exit_reason") or ""}
 
 
-def read_trade_book(home):
-    """Open positions from the live session, and every closed trade the bot has recorded.
-
-    Closed trades include the live session and each replay under trader/replays.
-    A missing or unreadable file is skipped. Paper and live fills both land here;
-    the row does not place an order.
-    """
+def _session_files(home):
+    """(path, date) for each saved session, oldest replay first and the live file last."""
     live_path = os.path.join(home, "trader", "state", "bot.json")
-    paths = []
-    if os.path.isfile(live_path):
-        paths.append(live_path)
+    files = []
     replays = os.path.join(home, "trader", "replays")
     if os.path.isdir(replays):
         for day in sorted(os.listdir(replays)):
             path = os.path.join(replays, day, "trader", "state", "bot.json")
             if os.path.isfile(path):
-                paths.append(path)
-    opens, closed = [], []
-    for path in paths:
+                files.append(path)
+    if os.path.isfile(live_path):
+        files.append(live_path)
+    return files
+
+
+def read_trade_book(home):
+    """Open positions and closed trades from the live session and every replay.
+
+    A newer session replaces an older open row for the same symbol. A missing
+    or unreadable file is skipped. Paper and live fills both land here; the
+    row does not place an order.
+    """
+    opens, closed = {}, []
+    for path in _session_files(home):
         state = bot.read_state(path)
         if not state:
             continue
         date = state.get("date") or ""
-        live = os.path.abspath(path) == os.path.abspath(live_path)
         for symbol, pos in (state.get("positions") or {}).items():
             if not isinstance(pos, dict):
                 continue
             when = pos.get("exit_time") or date
             row = _trade_row(symbol, pos, when)
             if pos.get("status") == "closed":
+                opens.pop(symbol, None)
                 closed.append(row)
-            elif live and pos.get("status") == "open":
-                opens.append(row)
+            elif pos.get("status") == "open":
+                opens[symbol] = row
+    opens = [opens[symbol] for symbol in sorted(opens)]
     closed.sort(key=lambda row: row.get("when") or "", reverse=True)
     wins = len([row for row in closed if row["result"] == "profit"])
     losses = len([row for row in closed if row["result"] == "loss"])
@@ -391,6 +399,7 @@ class App(object):
         self.btn_stop.pack(side="left", padx=(0, 6))
         ttk.Button(bar, text="Settings folder", command=self.open_settings).pack(side="right")
         ttk.Button(bar, text="Clear log", command=self.clear).pack(side="right", padx=(0, 6))
+        self._build_desk_book(bot_tab)
         self._build_markets(bot_tab)
         self._build_market(market_tab)
         self._build_trade(trade_tab)
@@ -471,6 +480,29 @@ class App(object):
         self.locked = False
         self.lock.place_forget()
         self.append("Opened with the code from Day Trader Code.\n", "good")
+
+    def _reel_symbols(self):
+        """Symbols for Replay the reel day. One name becomes the recorded basket."""
+        typed = tape.split_symbols(self.symbols_var.get(), limit=40)
+        if len(typed) <= 1:
+            return list(REEL_SHOW)
+        return typed[:8]
+
+    def _build_desk_book(self, tab):
+        """Open positions and closed trades on the Bot tab, where the run buttons are."""
+        box = ttk.LabelFrame(tab, text="Open positions and trades")
+        box.pack(fill="x", padx=8, pady=(0, 6))
+        self.desk_note = tk.StringVar(value="No open position yet. Set Mode to auto and press Replay the reel day.")
+        ttk.Label(box, textvariable=self.desk_note).pack(anchor="w", padx=6, pady=(4, 0))
+        cols = ("symbol", "state", "qty", "entry", "price", "pnl", "result")
+        heads = ("Symbol", "State", "Qty", "Entry", "Price", "P&L", "Result")
+        self.desk_book = ttk.Treeview(box, columns=cols, show="headings", height=6)
+        for name, heading in zip(cols, heads):
+            self.desk_book.heading(name, text=heading)
+            self.desk_book.column(name, width=90, anchor="e" if name != "symbol" else "w")
+        self.desk_book.tag_configure("profit", foreground="#1b7f3b")
+        self.desk_book.tag_configure("loss", foreground="#b00020")
+        self.desk_book.pack(fill="x", padx=6, pady=6)
 
     def _build_markets(self, tab):
         box = ttk.LabelFrame(tab, text="Stocks, commodities and currencies. Pick types, then watch them. "
@@ -1099,6 +1131,28 @@ class App(object):
                 _money(row.get("stop")) if row.get("stop") else "-",
                 _money(row.get("target")) if row.get("target") else "-"))
 
+    def _show_desk_rows(self, book):
+        self.desk_book.delete(*self.desk_book.get_children())
+        rows = []
+        for row in book["open"]:
+            rows.append((row, "open", row.get("mark")))
+        for row in book["closed"][:12]:
+            rows.append((row, "closed", row.get("exit")))
+        for row, state, price in rows:
+            self.desk_book.insert("", "end", tags=(row["result"],), values=(
+                row.get("symbol"), state, row.get("qty"), _money(row.get("entry")),
+                _money(price), _signed_money(row.get("pnl")), row.get("result")))
+        if book["open"]:
+            names = ", ".join(row["symbol"] for row in book["open"])
+            self.desk_note.set("Open: %d (%s), unrealised %s." % (
+                len(book["open"]), names, _signed_money(book["open_pnl"])))
+        elif book["closed"]:
+            self.desk_note.set("No open position. %d closed trade%s, realised %s." % (
+                len(book["closed"]), "" if len(book["closed"]) == 1 else "s",
+                _signed_money(book["closed_pnl"])))
+        else:
+            self.desk_note.set("No open position yet. Set Mode to auto and press Replay the reel day.")
+
     def _show_history_rows(self, rows):
         self.history.delete(*self.history.get_children())
         for row in rows:
@@ -1139,6 +1193,7 @@ class App(object):
             open_n = len(self.tree.get_children())
             open_pnl = round(sum(_position_pnl(p) or 0 for p in self.account_doc.get("positions") or []), 2)
         self._show_history_rows(book["closed"])
+        self._show_desk_rows(book)
         if open_n:
             live = "Live: %d open, unrealised %s." % (open_n, _signed_money(open_pnl))
         else:
@@ -1343,8 +1398,9 @@ class App(object):
             messagebox.showinfo("Busy", "The bot is already running. Stop it first.")
             return
         mode, broker = self.mode_var.get(), self.broker_var.get()
+        symbols = ",".join(self._reel_symbols()) if action == "reel" else self.symbols_var.get()
         try:
-            argv = build_argv(action, self.symbols_var.get(), mode, broker, self.scan_var.get(), self.home)
+            argv = build_argv(action, symbols, mode, broker, self.scan_var.get(), self.home)
         except ValueError as e:
             messagebox.showerror("Day Trader Bot", str(e))
             return
@@ -1560,6 +1616,7 @@ class App(object):
         self.reply_lbl.configure(text="Reply")
         self.tail = ""
         self._refresh_header()
+        self._refresh_trades()
 
 
 def _ensure_stdio():

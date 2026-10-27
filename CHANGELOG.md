@@ -4,6 +4,14 @@ The installed app reads the newest entry's notes from `releases/latest.json`
 and shows them next to its "Update to ..." button. Keep the newest version at
 the top, one `## <version> (<date>)` heading per release.
 
+## 2.5.2 (2026-10-27)
+
+- Open positions for every symbol show on the Bot tab and the Trade tab,
+  including a replay. Replay the reel day with Mode set to auto fills several
+  stocks from the recorded day (AAPL, TJX and the others), not only Tesla.
+  A missing 60-day history file no longer hides those replay trades.
+  FLATTEN ALL still closes everything.
+
 ## 2.5.1 (2026-10-24)
 
 - The login code opens the bot. Day Trader Bot and Day Trader Code now share

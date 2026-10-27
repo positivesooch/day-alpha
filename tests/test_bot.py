@@ -129,6 +129,18 @@ class Replay(unittest.TestCase):
         self.assertIn("DRY RUN", " ".join(e["text"] for e in st["events"]))
         self.assertIn("Not financial advice", out)
 
+    def test_a_replay_opens_other_stocks_that_have_no_history_file(self):
+        work = os.path.join(self.d, "many")
+        code, out, err = run(["replay", "--into", work, "--bot", self.botcfg, "--fixtures", "--fresh",
+                              "--symbols", "AAPL,TJX", "--mode", "auto", "--quiet"])
+        self.assertEqual(code, 0, err)
+        with open(os.path.join(work, "trader", "state", "bot.json")) as fh:
+            st = json.load(fh)
+        self.assertEqual(st["positions"]["AAPL"]["status"], "open")
+        self.assertEqual(st["positions"]["TJX"]["status"], "open")
+        for sym in ("AAPL", "TJX"):
+            self.assertNotIn("60-day", " ".join(st["candidates"][sym].get("reasons") or []))
+
     def test_auto_mode_takes_the_trade_on_the_sim_and_logs_it_as_the_bot(self):
         code, out, err, st, work = self.replay("--mode", "auto")
         self.assertEqual(code, 0, err)
@@ -603,6 +615,16 @@ class Window(unittest.TestCase):
             self.assertEqual(g._pnl_result(0), "flat")
             self.assertEqual(g._signed_money(-20.5), "-$20.50")
             self.assertEqual(g._signed_money(15.5), "+$15.50")
+            replay_open = os.path.join(d, "trader", "replays", "2026-10-19", "trader", "state")
+            os.makedirs(replay_open)
+            with open(os.path.join(replay_open, "bot.json"), "w", encoding="utf-8") as fh:
+                json.dump({"date": "2026-10-19", "positions": {
+                    "AAPL": {"status": "open", "qty": 10, "entry": 220.0, "mark": 222.5},
+                    "MSFT": {"status": "open", "qty": 4, "entry": 500.0, "mark": 498.0},
+                }}, fh)
+            book = g.read_trade_book(d)
+            self.assertEqual([row["symbol"] for row in book["open"]], ["AAPL", "MSFT", "TJX"])
+            self.assertEqual(book["open"][1]["result"], "loss")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

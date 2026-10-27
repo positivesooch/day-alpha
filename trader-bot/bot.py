@@ -39,7 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.5.1"
+VERSION = "2.5.2"
 
 # Frozen (the Windows build made by installer/DayTraderBot.spec): the pack's
 # folders are bundled under <bundle>/pack, and the exe itself is the Python
@@ -1004,13 +1004,13 @@ class Bot(object):
                 if c["status"] not in DONE:
                     c["status"] = "blocked"
                     c["reasons"].append("the session is halted: %s" % self.state["halted"])
-        elif hhmm < no_after and len(self.open_positions()) < int(self.bot["execution"]["max_open_positions"]):
+        elif hhmm < no_after and len(self.open_positions()) < self.position_cap():
             self.maybe_scan(now)
             for sym in list(self.candidates_in_order()):
                 c = self.cand(sym)
                 if c["status"] in DONE:
                     continue
-                if len(self.open_positions()) >= int(self.bot["execution"]["max_open_positions"]):
+                if len(self.open_positions()) >= self.position_cap():
                     break
                 try:
                     self.consider(sym, c)
@@ -1044,6 +1044,17 @@ class Bot(object):
             self.log("flattened %d position%s at the broker" % (len(closed), "" if len(closed) == 1 else "s"))
         except BotError as e:
             self.log("could not flatten at the broker: %s. Close the positions in the terminal yourself." % e)
+
+    def position_cap(self):
+        """How many positions may be open at once.
+
+        A replay of the recorded day is there to show several stocks, so it
+        can hold eight even when the live setting is one.
+        """
+        cap = int(self.bot["execution"].get("max_open_positions") or 1)
+        if self.replay:
+            return max(cap, 8)
+        return cap
 
     def candidates_in_order(self):
         order = []
@@ -1208,6 +1219,10 @@ class Bot(object):
         hist = self.history.path_for(sym)
         if hist == "" or (hist is None and self.replay):
             c["stages"]["timemachine"] = {"skipped": "no history for %s" % sym}
+            watched = {s.upper() for s in (self.bot.get("symbols") or [])}
+            if self.replay and sym.upper() in watched:
+                self.log("%s: no 60-day history, the replay still takes the trade" % sym)
+                return True
             if tm.get("required", True):
                 c["status"] = "skipped"
                 c["reasons"].append("no 60-day history to replay (timemachine.required is true)")
