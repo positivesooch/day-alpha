@@ -4,6 +4,15 @@ The installed app reads the newest entry's notes from `releases/latest.json`
 and shows them next to its "Update to ..." button. Keep the newest version at
 the top, one `## <version> (<date>)` heading per release.
 
+## 2.5.3 (2026-10-27)
+
+- Forex on MetaTrader 5. While forex is open (Sunday 22:00 UTC through
+  Friday 22:00 UTC) the bot can buy a pair that breaks the prior hour,
+  including overnight when the NYSE is closed. EURUSD stays EURUSD at the
+  terminal, and the stop keeps its pips instead of rounding to a cent.
+  A forex position stays open until Friday 21:55 UTC. A REAL account still
+  places nothing until live auto is armed. FLATTEN ALL still closes everything.
+
 ## 2.5.2 (2026-10-27)
 
 - Open positions for every symbol show on the Bot tab and the Trade tab,

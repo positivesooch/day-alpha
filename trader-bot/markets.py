@@ -118,6 +118,32 @@ def catalog():
     return pick(ids_of(), futures=True)
 
 
+_FX = {"EUR", "USD", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD", "ZAR", "MXN", "SEK", "NOK", "TRY"}
+
+
+def is_forex(symbol):
+    """True for a spot pair: EURUSD, EURUSD=X, or a name in the forex groups."""
+    raw = (symbol or "").strip().upper()
+    if not raw:
+        return False
+    if raw.endswith("=X"):
+        raw = raw[:-2]
+    return len(raw) == 6 and raw[:3] in _FX and raw[3:] in _FX
+
+
+def forex_open(now_utc):
+    """The forex week: Sunday 22:00 UTC through Friday 22:00 UTC. `now_utc` is naive UTC."""
+    wd = now_utc.weekday()
+    minutes = now_utc.hour * 60 + now_utc.minute
+    if wd == 5:
+        return False
+    if wd == 6:
+        return minutes >= 22 * 60
+    if wd == 4:
+        return minutes < 22 * 60
+    return True
+
+
 def mt5_map(group_ids):
     """Futures ticker -> the MetaTrader 5 name, for the groups that were picked."""
     out = {}

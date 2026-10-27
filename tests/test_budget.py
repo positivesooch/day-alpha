@@ -105,6 +105,19 @@ class TheReel(unittest.TestCase):
         self.assertIn("bound by your $50 max loss", why)
         self.assertIn("$46.88", why)
 
+    def test_a_forex_plan_is_not_rounded_to_the_cent(self):
+        plan_fx = {"symbol": "EURUSD", "side": "buy", "setup": "fx", "date": "2026-10-27",
+                   "entry": 1.0892, "stop": 1.0868, "target": 1.0916, "flat_by": "15:55"}
+        s = size.size_trade(plan_fx, cfg(), today="2026-10-27")
+        self.assertIsNone(s["refusal"])
+        self.assertGreater(s["qty"], 100)
+        self.assertAlmostEqual(s["entry"], 1.0892, places=5)
+        self.assertAlmostEqual(s["stop"], 1.0868, places=5)
+        self.assertLess(s["stop"], s["entry"])
+        order = size.bracket_order(s)
+        self.assertEqual(order["stop_loss_stop_price"], "1.08680")
+        self.assertNotEqual(order["stop_loss_stop_price"][:4], order["take_profit_limit_price"][:4])
+
     def test_the_fixture_orders_file_is_what_it_writes(self):
         with open(os.path.join(FIX, "trader-risk", "orders-tsla.json")) as fh:
             fixture = json.load(fh)["orders"][0]

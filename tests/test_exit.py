@@ -264,6 +264,19 @@ class Cli(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("no time left to hold it", err)
 
+    def test_a_forex_stop_keeps_the_pip(self):
+        code, out, err = run(exitp, ["plan", "--symbol", "EURUSD", "--entry", "1.089",
+                                     "--or-high", "1.086", "--or-low", "1.084", "--setup", "fx",
+                                     "--stop", "or-low", "--target", "1R", "--date", "2026-10-27",
+                                     "--json", "--now", "2026-10-27 01:05"])
+        self.assertEqual(code, 0, err)
+        plan = json.loads(out)
+        self.assertEqual(plan["setup"], "fx")
+        self.assertAlmostEqual(plan["stop"], 1.084, places=5)
+        self.assertAlmostEqual(plan["entry"], 1.089, places=5)
+        self.assertAlmostEqual(plan["target"], 1.094, places=5)
+        self.assertGreater(abs(plan["stop"] - round(plan["stop"], 2)), 0.001)
+
     def test_show_without_a_plan(self):
         code, text, _ = run(exitp, ["show"])
         self.assertEqual(code, 1)

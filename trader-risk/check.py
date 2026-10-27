@@ -85,6 +85,15 @@ TYPES = {"market", "limit", "stop", "stop_limit", "trailing_stop"}
 TIFS = {"day", "gtc", "opg", "cls", "ioc", "fok"}
 OCC = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
 TICKER = re.compile(r"^[A-Z]{1,5}([.\-][A-Z]{1,2})?$")
+_FX = {"EUR", "USD", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD", "ZAR", "MXN", "SEK", "NOK", "TRY"}
+
+
+def is_forex(sym):
+    """A spot pair (EURUSD or EURUSD=X). Six letters, so it is not a US stock ticker."""
+    raw = str(sym or "").strip().upper()
+    if raw.endswith("=X"):
+        raw = raw[:-2]
+    return len(raw) == 6 and raw[:3] in _FX and raw[3:] in _FX
 HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 CENT = 0.005
 FRESH_MINUTES = 15
@@ -424,6 +433,8 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         tif = str(o.get("time_in_force", "day")).strip().lower()
         qty, notional = o.get("qty"), o.get("notional")
         plan = o.get("plan") if isinstance(o.get("plan"), dict) else {}
+        fx = is_forex(sym) or plan.get("setup") == "fx"
+        tol = 5e-7 if fx else CENT
         oc = str(o.get("order_class") or "").strip().lower()
         legs = o.get("take_profit_limit_price") is not None or o.get("stop_loss_stop_price") is not None
         bracket = oc == "bracket" or (not oc and legs)
@@ -479,6 +490,8 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                                "(\"allow_options\": false)" % sym)
             else:
                 warns.append("option order: options can lose 100%% of what you pay")
+        elif sym and is_forex(sym):
+            pass
         elif sym and ("/" in sym or not TICKER.match(sym)):
             reasons.append("asset: %s does not look like a US stock or ETF ticker; "
                            "this pack trades stocks and ETFs only" % sym)
@@ -495,8 +508,11 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
             cands = [(p, w) for p, w in ((plan_entry, "plan"), (live, "price")) if p]
             if cands:
                 ref, ref_from = max(cands, key=lambda x: x[0])
-                ref = _cent(ref)
-                if live and ref_from == "price" and plan_entry and live > plan_entry + CENT:
+                if fx:
+                    ref = round(ref, 3 if ref >= 20 else 5)
+                else:
+                    ref = _cent(ref)
+                if live and ref_from == "price" and plan_entry and live > plan_entry + tol:
                     info.append("%s last %s is above the plan's entry %s: the risk is measured from %s"
                                 % (sym, _p(ref), _p(plan_entry), _p(ref)))
             elif sym in prices:
@@ -574,7 +590,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
             leg_stop, plan_stop = _f(o.get("stop_loss_stop_price")), _f(plan.get("stop"))
             stop = leg_stop if leg_stop else plan_stop
             target = _f(o.get("take_profit_limit_price")) or _f(plan.get("target"))
-            if leg_stop and plan_stop and abs(leg_stop - plan_stop) > CENT:
+            if leg_stop and plan_stop and abs(leg_stop - plan_stop) > tol:
                 warns.append("the bracket stop %s differs from the plan's stop %s: the bracket's is the one "
                              "the broker uses" % (_p(leg_stop), _p(plan_stop)))
             if stop and not leg_stop:
@@ -587,12 +603,14 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                 else:
                     warns.append("no stop: the max loss is not capped, so it is not counted in the daily loss")
             elif ref:
-                if (long and stop >= ref - CENT) or (not long and stop <= ref + CENT):
+                if (long and stop >= ref - tol) or (not long and stop <= ref + tol):
                     later.append("stop: the stop %s must be %s the entry %s for a %s"
                                  % (_p(stop), "below" if long else "above", _p(ref), side))
                 else:
-                    risk_c = int(round(abs(ref - stop) * 100))
-                    risk_ps = risk_c / 100.0
+                    if fx:
+                        risk_ps = abs(ref - stop)
+                    else:
+                        risk_ps = int(round(abs(ref - stop) * 100)) / 100.0
                     shares = q if q is not None else ((value or 0) / ref)
                     max_loss = round(shares * risk_ps, 2)
                     cap = _f(c.get("max_loss_per_trade_usd"))
@@ -601,11 +619,13 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                                      "per trade" % (_num(shares), _p(risk_ps), money(max_loss), money(cap)))
                     min_rr = _f(c.get("min_reward_risk"))
                     if target:
-                        if (long and target <= ref + CENT) or (not long and target >= ref - CENT):
+                        if (long and target <= ref + tol) or (not long and target >= ref - tol):
                             later.append("target: the target %s must be %s the entry %s"
                                          % (_p(target), "above" if long else "below", _p(ref)))
                         else:
-                            rr = round(int(round(abs(target - ref) * 100)) / float(risk_c), 2)
+                            move = abs(target - ref)
+                            rr = round(move / risk_ps, 2) if fx else round(
+                                int(round(move * 100)) / float(int(round(abs(ref - stop) * 100))), 2)
                             if min_rr and rr < min_rr - 1e-9:
                                 later.append("reward:risk: %.2f (target %s, entry %s, stop %s) is under your "
                                              "minimum %s" % (rr, _p(target), _p(ref), _p(stop), _num(min_rr)))
@@ -623,7 +643,8 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
             if cap_t and len(entries_today) + batch_entries >= cap_t:
                 later.append("trades: %d entries placed today plus %d passed earlier in this batch, your limit "
                              "is %d a day" % (len(entries_today), batch_entries, cap_t))
-            later.extend(win_reasons)
+            if not fx:
+                later.extend(win_reasons)
             if c.get("pdt_guard") and pdt_n >= 3:
                 later.append("pdt: %d day trades in the last 5 business days (%s); a 4th trips the "
                              "pattern-day-trader rule your broker applies (\"pdt_guard\": true)"

@@ -883,6 +883,11 @@ class MT5Link(unittest.TestCase):
         self.assertEqual(mt5link.firm_symbol(cfg, "TSLA"), "TSLA.US")
         self.assertEqual(mt5link.firm_symbol(cfg, "nvda"), "NVDA.cash")
         self.assertEqual(mt5link.firm_symbol({}, "XAUUSD"), "XAUUSD")
+        self.assertEqual(mt5link.firm_symbol({"symbol_suffix": ".US"}, "EURUSD=X"), "EURUSD")
+        self.assertEqual(mt5link.firm_symbol({"symbol_suffix": ".US"}, "EURUSD"), "EURUSD")
+        self.assertEqual(mt5link.firm_symbol({"symbol_suffix": ".US", "symbols": {"EURUSD": "EURUSD.r"}},
+                                             "EURUSD=X"), "EURUSD.r")
+        self.assertEqual(mt5link.firm_symbol({"symbol_suffix": ".US"}, "NVDA"), "NVDA.US")
 
     def test_lots_follow_the_contract_and_fit_the_max_loss(self):
         one = FakeMT5().symbol_info("TSLA.US")
@@ -1765,6 +1770,60 @@ class LiveChart(unittest.TestCase):
                 app._closing = True
             root.destroy()
             shutil.rmtree(d, ignore_errors=True)
+
+
+class ForexSession(unittest.TestCase):
+    def test_the_forex_week(self):
+        import markets
+        self.assertFalse(markets.forex_open(datetime.datetime(2026, 10, 24, 12, 0)))
+        self.assertFalse(markets.forex_open(datetime.datetime(2026, 10, 25, 21, 0)))
+        self.assertTrue(markets.forex_open(datetime.datetime(2026, 10, 25, 22, 0)))
+        self.assertTrue(markets.forex_open(datetime.datetime(2026, 10, 27, 2, 8)))
+        self.assertTrue(markets.forex_open(datetime.datetime(2026, 10, 30, 21, 59)))
+        self.assertFalse(markets.forex_open(datetime.datetime(2026, 10, 30, 22, 0)))
+        self.assertTrue(markets.is_forex("EURUSD=X"))
+        self.assertTrue(markets.is_forex("USDJPY"))
+        self.assertFalse(markets.is_forex("TSLA"))
+        self.assertFalse(markets.is_forex("XAUUSD"))
+
+    def test_forex_is_not_flattened_at_the_stock_close(self):
+        b = bot.Bot.__new__(bot.Bot)
+        b.cfg = {"flat_by": "15:55"}
+        self.assertFalse(b.should_flatten({"symbol": "EURUSD"}, datetime.datetime(2026, 10, 27, 2, 8)))
+        self.assertFalse(b.should_flatten({"symbol": "EURUSD"}, datetime.datetime(2026, 10, 30, 21, 54)))
+        self.assertTrue(b.should_flatten({"symbol": "EURUSD"}, datetime.datetime(2026, 10, 30, 21, 55)))
+        self.assertFalse(b.should_flatten({"symbol": "TSLA"}, datetime.datetime(2026, 10, 19, 18, 0)))
+        self.assertTrue(b.should_flatten({"symbol": "TSLA"}, datetime.datetime(2026, 10, 19, 19, 55)))
+
+    def test_overnight_forex_is_still_considered(self):
+        b = bot.Bot.__new__(bot.Bot)
+        b.cfg = {"no_entries_after": "15:30", "flat_by": "15:55"}
+        b.bot = {"symbols": ["EURUSD", "TSLA"], "execution": {"max_open_positions": 1},
+                 "scan": {"enabled": False}, "setup": {"or_minutes": 15, "interval": "5m"}}
+        b.replay = False
+        b.guard = None
+        b.state = {"date": "2026-10-26", "halted": None, "positions": {},
+                   "candidates": {"EURUSD": {"status": "waiting", "stages": {}, "reasons": []},
+                                  "TSLA": {"status": "waiting", "stages": {}, "reasons": []}}}
+        b.save = lambda: None
+        b.log = lambda *a, **k: None
+        b.note = lambda *a, **k: None
+        b.check_halt_file = lambda: None
+        b.prop_emergency = lambda now: None
+        b.watch_position = lambda pos, flat: None
+        seen = []
+        b.consider = lambda sym, c: seen.append(sym)
+        b.maybe_scan = lambda now: (_ for _ in ()).throw(AssertionError("the stock scanner ran overnight"))
+        now = datetime.datetime(2026, 10, 27, 2, 8)
+        b.tick(now)
+        self.assertEqual(seen, ["EURUSD"])
+        self.assertEqual(b.state["candidates"]["TSLA"]["status"], "expired")
+        self.assertEqual(b.state["candidates"]["EURUSD"]["status"], "waiting")
+        b.state["positions"] = {"GBPUSD": {"status": "open", "symbol": "GBPUSD"}}
+        del seen[:]
+        b.tick(now)
+        self.assertEqual(seen, [])
+        self.assertEqual(b.state["candidates"]["EURUSD"]["status"], "waiting")
 
 
 if __name__ == "__main__":

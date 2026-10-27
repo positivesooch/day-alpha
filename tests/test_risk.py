@@ -243,6 +243,19 @@ class DayTradeChecks(unittest.TestCase):
         self.assertIn("early close", " ".join(self.one(tsla(), now="2026-11-27 12:30")["warnings"]))
         res = self.one(tsla(), now="2026-10-17 10:15", no_entries_before=None, no_entries_after=None)
         self.assertEqual(verdicts(res), ["PASS"])
+
+    def test_forex_can_pass_while_the_nyse_is_closed(self):
+        order = {"symbol": "EURUSD", "side": "buy", "qty": "3000", "type": "market", "time_in_force": "day",
+                 "order_class": "bracket", "take_profit_limit_price": "1.09400",
+                 "stop_loss_stop_price": "1.08400",
+                 "plan": {"entry": 1.089, "stop": 1.084, "target": 1.094, "setup": "fx",
+                          "risk_per_share": 0.005, "max_loss": 15.0}}
+        now = datetime.datetime(2026, 10, 27, 2, 8)  # 22:08 New York, Monday, forex open
+        res = check.check([order], cfg(), now=now)
+        self.assertEqual(verdicts(res), ["PASS"], reasons(res))
+        self.assertNotIn("does not look like", " ".join(reasons(res)))
+        self.assertEqual(verdicts(check.check([tsla()], cfg(), now=now)), ["BLOCK"])
+
         with self.assertRaises(check.RiskError):
             self.one(tsla(), no_entries_before="9.45am")
 

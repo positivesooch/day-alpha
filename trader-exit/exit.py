@@ -202,14 +202,18 @@ def D(x, what="a number"):
         raise PlanError("%s is not a number: %r" % (what, x))
 
 
-def cents(x):
-    """Round half up to the cent."""
-    return D(x).quantize(CENT, rounding=ROUND_HALF_UP)
+def cents(x, tick=CENT):
+    """Round half up to the cent, or to tick for a forex price."""
+    return D(x).quantize(tick, rounding=ROUND_HALF_UP)
 
 
 def floor_cents(x):
     """A long's stop: round down, away from the entry."""
     return D(x).quantize(CENT, rounding=ROUND_FLOOR)
+
+
+def floor_price(x, tick=CENT):
+    return D(x).quantize(tick, rounding=ROUND_FLOOR)
 
 
 def money(x):
@@ -268,16 +272,16 @@ def r_label(r):
 
 
 def compute(entry, stop_rule, stop_param, target_rule, target_param, or_high=None, or_low=None,
-            atr=None, atr_bars=None):
+            atr=None, atr_bars=None, tick=CENT):
     """The stop, the target and the risk, in exact cents. Raises PlanError with the reason."""
-    e = cents(entry)
+    e = cents(entry, tick)
     if e <= 0:
         raise PlanError("the entry price must be above $0")
     detail = ""
     if stop_rule in ("or_mid", "or_low"):
         if or_high is None or or_low is None:
             raise PlanError("an %s stop needs the opening range (--or-high and --or-low)" % stop_rule.replace("_", "-"))
-        oh, ol = cents(or_high), cents(or_low)
+        oh, ol = cents(or_high, tick), cents(or_low, tick)
         if oh <= ol:
             raise PlanError("the opening-range high %s must be above its low %s" % (money(oh), money(ol)))
         if stop_rule == "or_mid":
@@ -302,7 +306,7 @@ def compute(entry, stop_rule, stop_param, target_rule, target_param, or_high=Non
             num(a.quantize(Decimal("0.0001"))), atr_bars, " (fewer than 14 so far)" if atr_bars < ATR_BARS else "")
     else:
         raise PlanError("unknown stop rule %r" % stop_rule)
-    stop = floor_cents(raw)
+    stop = floor_price(raw, tick)
     if stop != D(raw):
         detail = (detail + ", rounded down" if detail else "$%s rounded down" % num(raw))
     if stop >= e:
@@ -317,10 +321,10 @@ def compute(entry, stop_rule, stop_param, target_rule, target_param, or_high=Non
                         "survive the spread, normal wiggle would stop you out. Widen it."
                         % (money(risk), money(floor_risk.quantize(CENT, rounding=ROUND_HALF_UP)), money(e)))
     if target_rule == "r":
-        target = cents(e + target_param * risk)
+        target = cents(e + target_param * risk, tick)
         t_label = r_label(target_param)
     else:
-        target = cents(target_param)
+        target = cents(target_param, tick)
         t_label = None
     if target <= e:
         raise PlanError("the target %s is at or below the entry %s: a long's target goes above it"
@@ -590,12 +594,15 @@ def build_plan(a, now_utc):
             raise PlanError("an atr stop needs at least 3 closed %s bars of %s on %s by the entry; found %d"
                             % (info["interval"], info["symbol"], day, len(bars)))
         atr, atr_n = atr_of(bars)
+    tick = CENT
+    if info["setup"] == "fx":
+        tick = Decimal("0.001") if D(info["entry"]) >= 20 else Decimal("0.00001")
     c = compute(info["entry"], stop_rule, stop_param, target_rule, target_param, info["or_high"], info["or_low"],
-                atr, atr_n)
+                atr, atr_n, tick)
     flat_by, flat_note = resolve_flat_by(day, a.flat_by, cfg, entry_time)
     orr = None
     if info["or_high"] is not None and info["or_low"] is not None:
-        orr = {"high": float(cents(info["or_high"])), "low": float(cents(info["or_low"])),
+        orr = {"high": float(cents(info["or_high"], tick)), "low": float(cents(info["or_low"], tick)),
                "minutes": int(info["or_minutes"] or 15)}
     plan = {"created_by": "trader-exit", "symbol": info["symbol"], "side": "buy", "date": day.isoformat(),
             "setup": info["setup"], "entry": float(c["entry"]),
@@ -701,7 +708,7 @@ def main(argv=None):
     p.add_argument("--or-high", type=float)
     p.add_argument("--or-low", type=float)
     p.add_argument("--or-minutes", type=int, default=15)
-    p.add_argument("--setup", choices=["orb", "level"])
+    p.add_argument("--setup", choices=["orb", "level", "fx"])
     p.add_argument("--date", help="session date YYYY-MM-DD (default: the entry's, or today)")
     p.add_argument("--time", help="entry time, e.g. 10:15 AM")
     p.add_argument("--entry-bar", type=int)

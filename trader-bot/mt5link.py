@@ -119,11 +119,21 @@ def ts_of(utc):
 # ---------------------------------------------------------------- symbols and lots
 
 def firm_symbol(cfg, ticker):
-    """Our ticker -> the firm's symbol: an explicit map first, then a suffix (TSLA -> TSLA.US)."""
+    """Our ticker -> the firm's symbol: an explicit map first, then a suffix (TSLA -> TSLA.US).
+
+    Forex pairs drop the Yahoo '=X' and never take a stock suffix, so EURUSD=X
+    is EURUSD at the terminal, not EURUSD.US.
+    """
     t = ticker.upper()
+    base = t[:-2] if t.endswith("=X") else t
     m = {str(k).upper(): v for k, v in (cfg.get("symbols") or {}).items()}
     if t in m:
         return m[t]
+    if base in m:
+        return m[base]
+    currencies = {"EUR", "USD", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD", "ZAR", "MXN", "SEK", "NOK", "TRY"}
+    if len(base) == 6 and base[:3] in currencies and base[3:] in currencies:
+        return base
     return t + (cfg.get("symbol_suffix") or "")
 
 

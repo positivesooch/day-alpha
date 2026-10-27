@@ -16,6 +16,7 @@ Standard library only (tkinter ships with Python on Windows and macOS; on
 Debian/Ubuntu it is the python3-tk package).
 """
 
+import datetime
 import json
 import os
 import queue
@@ -106,6 +107,19 @@ def _money(value):
         return "$%s" % format(float(value), ",.2f")
     except (TypeError, ValueError):
         return str(value)
+
+
+def _price(value):
+    """A quote. Forex under 20 keeps five decimals; a stock price stays in cents."""
+    if value is None or value == "":
+        return "-"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if 0 < abs(number) < 20:
+        return "%.5f" % number
+    return _money(number)
 
 
 def _signed_money(value):
@@ -1126,10 +1140,10 @@ class App(object):
         self.tree.delete(*self.tree.get_children())
         for row in rows:
             self.tree.insert("", "end", tags=(row["result"],), values=(
-                row.get("symbol"), row.get("side"), row.get("qty"), _money(row.get("entry")),
-                _money(row.get("mark")), _signed_money(row.get("pnl")), row.get("result"),
-                _money(row.get("stop")) if row.get("stop") else "-",
-                _money(row.get("target")) if row.get("target") else "-"))
+                row.get("symbol"), row.get("side"), row.get("qty"),                 _price(row.get("entry")),
+                _price(row.get("mark")), _signed_money(row.get("pnl")), row.get("result"),
+                _price(row.get("stop")) if row.get("stop") else "-",
+                _price(row.get("target")) if row.get("target") else "-"))
 
     def _show_desk_rows(self, book):
         self.desk_book.delete(*self.desk_book.get_children())
@@ -1140,8 +1154,8 @@ class App(object):
             rows.append((row, "closed", row.get("exit")))
         for row, state, price in rows:
             self.desk_book.insert("", "end", tags=(row["result"],), values=(
-                row.get("symbol"), state, row.get("qty"), _money(row.get("entry")),
-                _money(price), _signed_money(row.get("pnl")), row.get("result")))
+                row.get("symbol"), state, row.get("qty"), _price(row.get("entry")),
+                _price(price), _signed_money(row.get("pnl")), row.get("result")))
         if book["open"]:
             names = ", ".join(row["symbol"] for row in book["open"])
             self.desk_note.set("Open: %d (%s), unrealised %s." % (
@@ -1159,8 +1173,8 @@ class App(object):
             why = {"stop": "stop", "target": "target", "flat_by": "flat at the close"}.get(
                 row.get("why") or "", row.get("why") or "-")
             self.history.insert("", "end", tags=(row["result"],), values=(
-                row.get("when") or "-", row.get("symbol"), row.get("qty"), _money(row.get("entry")),
-                _money(row.get("exit")), why, row.get("result"), _signed_money(row.get("pnl"))))
+                row.get("when") or "-", row.get("symbol"), row.get("qty"),                 _price(row.get("entry")),
+                _price(row.get("exit")), why, row.get("result"), _signed_money(row.get("pnl"))))
 
     def _refresh_trades(self):
         """Read the session files and paint live positions plus closed profit and loss.
@@ -1399,6 +1413,13 @@ class App(object):
             return
         mode, broker = self.mode_var.get(), self.broker_var.get()
         symbols = ",".join(self._reel_symbols()) if action == "reel" else self.symbols_var.get()
+        fx = any(markets.is_forex(s) for s in tape.split_symbols(symbols, limit=40))
+        if action == "run" and broker == "mt5" and fx and mode == "dry-run":
+            mode = "auto"
+            open_now = markets.forex_open(datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None))
+            self.append(("Forex is open, so " if open_now else "A forex symbol is on the list, so ")
+                        + "this MetaTrader 5 run uses auto. A REAL account still "
+                        "places nothing until live auto is armed on Settings.\n", "prompt")
         try:
             argv = build_argv(action, symbols, mode, broker, self.scan_var.get(), self.home)
         except ValueError as e:

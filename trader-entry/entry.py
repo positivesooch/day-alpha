@@ -16,6 +16,9 @@ Setups (v2 plans longs only):
          above the range high. A wick above the high is not a trigger.
   level  the first completed bar that closes above --level (for example a
          20-day high from trader-scanner).
+  fx     a forex breakout. The level is the high of the previous --or-minutes
+         (default 60) of closed bars, and it triggers only when the latest
+         closed bar closes above that high. It ignores the NYSE clock.
   --min-volume-x X  the trigger bar also needs at least X times the average
          volume of the opening-range bars (the 9:30 bar carries the opening
          auction, so 1.0 is already a high bar).
@@ -414,8 +417,10 @@ def evaluate(chart, now_utc, setup="orb", or_minutes=15, interval="5m", level=No
     step = INTERVALS[interval]
     if or_minutes <= 0 or (or_minutes * 60) % step:
         raise EntryError("--or-minutes must be a whole number of %s bars" % interval)
-    if setup not in ("orb", "level"):
-        raise EntryError("--setup is orb or level")
+    if setup not in ("orb", "level", "fx"):
+        raise EntryError("--setup is orb, level or fx")
+    if setup == "fx":
+        return evaluate_fx(chart, now_utc, or_minutes=or_minutes, interval=interval)
     if setup == "level" and level is None:
         raise EntryError("--setup level needs --level PRICE (for example a 20-day high)")
     n_or = or_minutes * 60 // step
@@ -552,6 +557,70 @@ def evaluate(chart, now_utc, setup="orb", or_minutes=15, interval="5m", level=No
     return res
 
 
+def evaluate_fx(chart, now_utc, or_minutes=60, interval="5m"):
+    """A forex breakout, checked in UTC. The NYSE session does not apply."""
+    if interval not in INTERVALS:
+        raise EntryError("--interval is 5m or 1m")
+    step = INTERVALS[interval]
+    if or_minutes <= 0 or (or_minutes * 60) % step:
+        raise EntryError("--or-minutes must be a whole number of %s bars" % interval)
+    n = or_minutes * 60 // step
+    local = to_eastern(now_utc)
+    res = {"symbol": chart.get("symbol"), "setup": "fx", "side": "buy", "date": local.date().isoformat(),
+           "interval": interval, "or_minutes": or_minutes, "now": local.strftime("%Y-%m-%d %H:%M:%S"),
+           "status": "waiting", "phase": "open", "reason": "", "opening_range": None, "level": None,
+           "trigger": None, "last": None, "forming": None, "minutes_since": None, "_bars": []}
+    if not _forex_open(now_utc):
+        res.update(status="no-data", phase="closed",
+                   reason="the forex market is closed (it reopens Sunday 22:00 UTC)")
+        return res
+    now_ts = ts_of(now_utc)
+    bars = []
+    for b in chart.get("bars") or []:
+        if b["t"] % step:
+            continue
+        if b["t"] + step <= now_ts and b["t"] >= now_ts - 36 * 3600:
+            et = to_eastern(utc_of(b["t"]))
+            bars.append(dict(b, et=et, end=et + datetime.timedelta(seconds=step)))
+    res["_bars"] = bars
+    res["bars_closed"] = len(bars)
+    if len(bars) < n + 1:
+        res.update(phase="forming", reason="need %d closed bars for the forex range, have %d" % (n + 1, len(bars)))
+        return res
+    window, last = bars[-(n + 1):-1], bars[-1]
+    hi = max(b["h"] for b in window)
+    lo = min(b["l"] for b in window)
+    res["opening_range"] = {"high": round(hi, 5), "low": round(lo, 5), "minutes": or_minutes,
+                            "bars": len(window), "of": n, "complete": True}
+    res["level"] = round(hi, 5)
+    res["last"] = {"bar_start": hm(last["et"]), "close": round(last["c"], 5),
+                   "vs_level_pct": round(100.0 * (last["c"] / hi - 1), 2)}
+    if last["c"] > hi:
+        res.update(status="triggered", phase="open",
+                   reason="the %s bar closed above the prior %d-minute high" % (short(last["et"]), or_minutes))
+        res["trigger"] = {"time": ampm(last["end"]), "close_time": hm(last["end"]), "bar_start": hm(last["et"]),
+                          "bar_index": len(bars) - 1, "price": round(last["c"], 5), "close": last["c"],
+                          "volume": last.get("v"), "volume_x": None,
+                          "pct_over": round(100.0 * (last["c"] / hi - 1), 2)}
+        res["minutes_since"] = int((local - last["end"]).total_seconds() // 60)
+        return res
+    res["reason"] = "last close %.5f (%s bar), under the prior %d-minute high %.5f" % (
+        last["c"], short(last["et"]), or_minutes, hi)
+    return res
+
+
+def _forex_open(now_utc):
+    wd = now_utc.weekday()
+    minutes = now_utc.hour * 60 + now_utc.minute
+    if wd == 5:
+        return False
+    if wd == 6:
+        return minutes >= 22 * 60
+    if wd == 4:
+        return minutes < 22 * 60
+    return True
+
+
 def public(res):
     """The result without the internal bar list, ready for JSON."""
     return {k: v for k, v in res.items() if not k.startswith("_")}
@@ -586,6 +655,8 @@ SHORT = {"pre-open": "not open", "forming": "forming", "closed": "closed"}
 
 
 def setup_name(res):
+    if res["setup"] == "fx":
+        return "forex breakout (prior %d minutes)" % res["or_minutes"]
     if res["setup"] == "orb":
         return "opening-range breakout (%d-minute range)" % res["or_minutes"]
     return "close above $%.2f" % res["level"] if res["level"] is not None else "close above a level"
@@ -601,12 +672,15 @@ def describe(res):
         head += ", data to %s" % res["data_time"][11:]
     out = [head]
     orr = res.get("opening_range")
-    if orr:
+    if orr and res.get("opens"):
         start = datetime.datetime.strptime(res["opens"], "%H:%M")
         end = start + datetime.timedelta(minutes=orr["minutes"])
         out.append("Opening range %s-%s: high $%.2f, low $%.2f (%d of %d bars%s)." % (
             short(start), short(end), orr["high"], orr["low"], orr["bars"], orr["of"],
             "" if orr["complete"] else ", still forming"))
+    elif orr and res.get("setup") == "fx":
+        out.append("Prior %d minutes: high %.5f, low %.5f (%d bars)." % (
+            orr["minutes"], orr["high"], orr["low"], orr["bars"]))
     label = PHASE_LABEL.get(res["phase"]) or LABEL.get(res["status"], res["status"].upper())
     t = res.get("trigger")
     if t:
@@ -916,7 +990,7 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd")
 
     def common(p):
-        p.add_argument("--setup", choices=["orb", "level"], default="orb")
+        p.add_argument("--setup", choices=["orb", "level", "fx"], default="orb")
         p.add_argument("--or-minutes", type=int, default=15, help="opening range length (default 15)")
         p.add_argument("--interval", choices=["5m", "1m"], default="5m")
         p.add_argument("--level", type=float, help="the price to close above (--setup level)")

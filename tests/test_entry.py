@@ -585,6 +585,36 @@ class Cli(unittest.TestCase):
         self.assertIn("run /trader-scanner first", err)
 
 
+class Forex(unittest.TestCase):
+    def chart(self, last=1.0890):
+        start = int((DT(2026, 10, 27) - DT(1970, 1, 1)).total_seconds())
+        bars = []
+        for i in range(13):
+            t = start + i * 300
+            close, high = (last, last + 0.0005) if i == 12 else (1.0850, 1.0860)
+            bars.append({"t": t, "o": 1.0840, "h": high, "l": 1.0830, "c": close, "v": 10})
+        return {"symbol": "EURUSD", "bars": bars}
+
+    def test_a_break_of_the_prior_hour_triggers(self):
+        r = entry.evaluate(self.chart(), DT(2026, 10, 27, 1, 5), setup="fx", or_minutes=60)
+        self.assertEqual(r["status"], "triggered")
+        self.assertEqual(r["opening_range"]["high"], 1.086)
+        self.assertAlmostEqual(r["trigger"]["price"], 1.089, places=5)
+        self.assertGreater(r["trigger"]["price"], r["level"])
+        self.assertLessEqual(r["minutes_since"], 5)
+        text = "\n".join(entry.describe(r))
+        self.assertIn("forex breakout", text)
+        self.assertIn("1.08600", text)
+
+    def test_saturday_is_closed_and_a_close_under_the_high_waits(self):
+        r = entry.evaluate(self.chart(), DT(2026, 10, 24, 12, 0), setup="fx", or_minutes=60)
+        self.assertEqual(r["status"], "no-data")
+        self.assertIn("forex market is closed", r["reason"])
+        r = entry.evaluate(self.chart(last=1.0855), DT(2026, 10, 27, 1, 5), setup="fx", or_minutes=60)
+        self.assertEqual(r["status"], "waiting")
+        self.assertIn("under the prior", r["reason"])
+
+
 class SkillDoc(unittest.TestCase):
     def test_skill_md(self):
         with open(os.path.join(ROOT, "trader-entry", "SKILL.md"), encoding="utf-8") as fh:

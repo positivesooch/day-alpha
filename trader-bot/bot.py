@@ -39,7 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.5.2"
+VERSION = "2.5.3"
 
 # Frozen (the Windows build made by installer/DayTraderBot.spec): the pack's
 # folders are bundled under <bundle>/pack, and the exe itself is the Python
@@ -66,6 +66,7 @@ README = os.path.join(BUNDLE if FROZEN else PACK, "README.md")
 
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
+import markets  # noqa: E402  (forex pairs and whether that market is open)
 import mt5link  # noqa: E402  (the MetaTrader 5 link; standard library until the bot connects)
 import update as updater  # noqa: E402  (one-click updates for the installed app)
 import vault  # noqa: E402  (broker credentials, encrypted for the Windows user)
@@ -437,6 +438,18 @@ def merged(defaults, user):
 
 def money(x):
     return "$%s" % format(round(float(x), 2), ",.2f")
+
+
+def quote(x):
+    """A price for the log. A stock stays in cents. A forex quote keeps its pips."""
+    v = float(x)
+    if abs(v) >= 20:
+        if abs(v - round(v, 2)) >= 5e-5:
+            return "$%.3f" % v
+        return money(x)
+    if abs(v - round(v, 2)) < 5e-7:
+        return money(x)
+    return "$%.5f" % v
 
 
 # ---------------------------------------------------------------- bars
@@ -966,11 +979,25 @@ class Bot(object):
     # ---- one tick
 
     def begin_day(self, now):
-        """The state belongs to today; a new day starts a fresh one."""
+        """The state belongs to today; a new day starts a fresh one.
+
+        A forex position can still be open when New York's date rolls. It stays
+        on the book so the bot does not open a second one, and the bracket
+        stays at the broker until Friday.
+        """
         self.now = now
         day = to_eastern(now).date()
         if self.state.get("date") != day.isoformat():
+            carried = {k: p for k, p in (self.state.get("positions") or {}).items()
+                       if p.get("status") == "open" and markets.is_forex(p.get("symbol") or k)}
             self.fresh_state(day)
+            if carried:
+                self.state["positions"] = carried
+                for pos in carried.values():
+                    self.cand(str(pos.get("symbol") or "")).update(status="open")
+                self.log("carried %d open forex position%s into the new New York day "
+                         "(the bracket stays at the broker)" % (len(carried), "" if len(carried) == 1 else "s"))
+                self.save()
         return day
 
     def halt_path(self):
@@ -990,13 +1017,14 @@ class Bot(object):
         self.begin_day(now)
         self.state["last_tick"] = ny_text(now)
         hhmm = ny_hhmm(now)
-        flat_by = self.cfg.get("flat_by") or "15:55"
         no_after = self.cfg.get("no_entries_after") or "15:30"
+        stock_window = hhmm < no_after
+        fx_window = markets.forex_open(now) and self.any_forex()
 
         self.check_halt_file()
         self.prop_emergency(now)
         for pos in self.open_positions():
-            self.watch_position(pos, hhmm >= flat_by or bool(self.state.get("halted")))
+            self.watch_position(pos, self.should_flatten(pos, now) or bool(self.state.get("halted")))
 
         if self.state.get("halted"):
             for sym in self.candidates_in_order():
@@ -1004,10 +1032,19 @@ class Bot(object):
                 if c["status"] not in DONE:
                     c["status"] = "blocked"
                     c["reasons"].append("the session is halted: %s" % self.state["halted"])
-        elif hhmm < no_after and len(self.open_positions()) < self.position_cap():
-            self.maybe_scan(now)
+        elif (stock_window or fx_window) and len(self.open_positions()) < self.position_cap():
+            if stock_window:
+                self.maybe_scan(now)
             for sym in list(self.candidates_in_order()):
+                forex = markets.is_forex(sym)
                 c = self.cand(sym)
+                if forex and not markets.forex_open(now):
+                    continue
+                if not forex and not stock_window:
+                    if c["status"] not in DONE:
+                        c["status"] = "expired"
+                        c["reasons"].append("no entries after %s" % no_after)
+                    continue
                 if c["status"] in DONE:
                     continue
                 if len(self.open_positions()) >= self.position_cap():
@@ -1020,6 +1057,8 @@ class Bot(object):
                     self.log("%s: %s" % (sym, e))
         elif hhmm >= no_after:
             for sym, c in self.state["candidates"].items():
+                if markets.is_forex(sym) and markets.forex_open(now):
+                    continue
                 if c["status"] not in DONE:
                     c["status"] = "expired"
                     c["reasons"].append("no entries after %s" % no_after)
@@ -1110,13 +1149,24 @@ class Bot(object):
 
     # ---- the pipeline for one symbol
 
+    def should_flatten(self, pos, now):
+        """Stocks flatten at flat_by. A forex position stays on its bracket until Friday 21:55 UTC."""
+        if markets.is_forex(pos.get("symbol") or ""):
+            return now.weekday() == 4 and (now.hour > 21 or (now.hour == 21 and now.minute >= 55))
+        return ny_hhmm(now) >= (self.cfg.get("flat_by") or "15:55")
+
+    def any_forex(self):
+        return any(markets.is_forex(s) for s in (self.bot.get("symbols") or []))
+
     def consider(self, sym, c):
         setup = self.bot["setup"]
-        args = ["check", sym, "--json", "--write", "trader/entry.json", "--setup", setup["kind"],
-                "--or-minutes", setup["or_minutes"], "--interval", setup["interval"]]
-        if setup.get("min_volume_x"):
+        kind = "fx" if markets.is_forex(sym) else setup["kind"]
+        minutes = 60 if kind == "fx" else setup["or_minutes"]
+        args = ["check", sym, "--json", "--write", "trader/entry.json", "--setup", kind,
+                "--or-minutes", minutes, "--interval", setup["interval"]]
+        if kind != "fx" and setup.get("min_volume_x"):
             args += ["--min-volume-x", setup["min_volume_x"]]
-        if setup["kind"] == "level":
+        if kind == "level":
             level = (c["stages"].get("scan") or {}).get("level") or setup.get("level")
             if not level:
                 raise BotError("a level setup needs a level (bot.json setup.level or a scanner hit with one)")
@@ -1141,7 +1191,7 @@ class Bot(object):
             return
         trig = ent["trigger"]
         self.log("%s: TRIGGERED %s at %s (%s bar closed above %s, +%s%%)" % (
-            sym, trig["time"], money(trig["price"]), trig["bar_start"], money(ent["level"]), trig["pct_over"]))
+            sym, trig["time"], quote(trig["price"]), trig["bar_start"], quote(ent["level"]), trig["pct_over"]))
         if (ent.get("minutes_since") or 0) > int(setup.get("stale_minutes") or 5):
             c["status"] = "skipped"
             c["reasons"].append("the trigger is %s minutes old: a late entry is a different trade" % ent["minutes_since"])
@@ -1197,7 +1247,8 @@ class Bot(object):
 
     def plan(self, sym, c):
         p = self.bot["plan"]
-        args = ["plan", "--from", "trader/entry.json", "--stop", p.get("stop") or "or-mid",
+        stop = "or-low" if markets.is_forex(sym) else (p.get("stop") or "or-mid")
+        args = ["plan", "--from", "trader/entry.json", "--stop", stop,
                 "--target", p.get("target") or "1R", "--write", "trader/plan.json", "--json"]
         off = self.bars.entry_path(sym)
         if off and str(p.get("stop", "")).startswith("atr"):
@@ -1207,14 +1258,19 @@ class Bot(object):
             raise BotError("exit plan failed: %s" % (err or "").strip()[-200:])
         c["stages"]["plan"] = {k: plan.get(k) for k in ("entry", "stop", "target", "risk_per_share", "reward_risk",
                                                         "stop_label", "target_label", "flat_by")}
+        flat = "Friday 21:55 UTC" if markets.is_forex(sym) else plan.get("flat_by")
         self.log("%s: plan: entry %s, stop %s (%s), target %s (%s), %s a share at risk, flat by %s" % (
-            sym, money(plan["entry"]), money(plan["stop"]), plan.get("stop_label"), money(plan["target"]),
-            plan.get("target_label"), money(plan["risk_per_share"]), plan.get("flat_by")))
+            sym, quote(plan["entry"]), quote(plan["stop"]), plan.get("stop_label"), quote(plan["target"]),
+            plan.get("target_label"), quote(plan["risk_per_share"]), flat))
         return plan
 
     def timemachine_ok(self, sym, c, plan):
         tm = self.bot["timemachine"]
         if not tm.get("enabled"):
+            return True
+        if markets.is_forex(sym) or (plan or {}).get("setup") == "fx":
+            c["stages"]["timemachine"] = {"skipped": "forex: the time machine replays the NYSE session"}
+            self.log("%s: time machine skipped (it replays the stock session; this is forex)" % sym)
             return True
         hist = self.history.path_for(sym)
         if hist == "" or (hist is None and self.replay):
@@ -1281,7 +1337,10 @@ class Bot(object):
         path = os.path.join(self.trader, "prices.json")
         doc = read_json(path, required=False) or {}
         prices, detail = dict(doc.get("prices") or {}), dict(doc.get("detail") or {})
-        prices[sym] = round(price, 2)
+        if markets.is_forex(sym):
+            prices[sym] = round(price, 3 if price >= 20 else 5)
+        else:
+            prices[sym] = round(price, 2)
         detail[sym] = {"time": utc_iso(when), "fetched": utc_iso(self.now), "source": "trader-bot/" + self.bars.kind}
         write_json(path, {"as_of": utc_iso(self.now), "source": "trader-bot", "prices": prices, "detail": detail,
                           "note": "Written by trader-bot from the bars it watches. Your broker's price is the one that fills."})
@@ -1591,11 +1650,16 @@ class Bot(object):
                      money(s["drawdown_limit"]), money(s["drawdown_used"]), s["buffer_pct"]))
 
     def run_live(self, until="16:05"):
-        day = to_eastern(parse_now(None)).date()
-        if day.weekday() >= 5:
-            raise BotError("it is the weekend in New York; the market is closed")
+        now = parse_now(None)
+        day = to_eastern(now).date()
+        fx = self.any_forex()
+        if day.weekday() >= 5 and not (fx and markets.forex_open(now)):
+            raise BotError("the market is closed" if fx else
+                           "it is the weekend in New York; the market is closed")
         self.log("live session %s: %s mode, %s broker, %s account. Ctrl-C stops the bot (open positions stay "
-                 "at the broker)." % (day.isoformat(), self.mode, self.broker_name, "PAPER" if self.paper else "LIVE"))
+                 "at the broker).%s" % (day.isoformat(), self.mode, self.broker_name,
+                                        "PAPER" if self.paper else "LIVE",
+                                        " Forex trades while the forex market is open." if fx else ""))
         if self.broker_name == "alpaca":
             acct = self.broker.account()
             self.log("Alpaca account %s, %s, equity %s" % (acct.get("account_number", "?"), acct.get("status", "?"),
@@ -1607,7 +1671,8 @@ class Bot(object):
         poll = int(self.bot.get("poll_seconds") or 20)
         while True:
             now = parse_now(None)
-            if ny_hhmm(now) >= until:
+            fx_on = fx and markets.forex_open(now)
+            if not fx_on and ny_hhmm(now) >= until:
                 break
             try:
                 self.tick(now)
@@ -1620,7 +1685,7 @@ class Bot(object):
             wait = (next_bar - now).total_seconds()
             if self.open_positions():
                 wait = min(wait, poll)
-            if ny_hhmm(now) < "09:30":
+            if not fx_on and ny_hhmm(now) < "09:30":
                 wait = min(max(wait, 1), 300)
             time.sleep(max(1.0, wait))
         self.state["finished"] = ny_text(parse_now(None))
