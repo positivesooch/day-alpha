@@ -1,12 +1,12 @@
 {
   "name": "Day Trader Bot",
-  "version": "2.5.1",
-  "published": "2026-10-24",
+  "version": "2.5.3",
+  "published": "2026-10-28",
   "installer": {
-    "url": "https://github.com/positivesooch/day-alpha/releases/download/v2.5.1/DayTraderBot-Setup-2.5.1.exe",
-    "file": "DayTraderBot-Setup-2.5.1.exe",
-    "sha256": "6d49c569ecf9186990b72fd31ce0ec5761156525561164f3891f8bce381d7ddb",
-    "size": 18648224
+    "url": "https://github.com/positivesooch/day-alpha/releases/download/v2.5.3/DayTraderBot-Setup-2.5.3.exe",
+    "file": "DayTraderBot-Setup-2.5.3.exe",
+    "sha256": "84be75c271bb06f046fe9d63b674d26b31676f20b2dc0971b864c2fbd2785112",
+    "size": 18664717
   },
-  "notes": "- The login code opens the bot. Day Trader Bot and Day Trader Code now share\n  one file, `%USERPROFILE%\\DayTraderBot\\trader\\state\\access.json`, even when\n  the two windows were started from different folders. The code is 6 digits\n  and lasts 12 hours. The Open screen has a button that opens Day Trader Code.\n  FLATTEN ALL still closes everything."
+  "notes": "- Forex on MetaTrader 5. While forex is open (Sunday 22:00 UTC through\n  Friday 22:00 UTC) the bot can buy a pair that breaks the prior hour,\n  including overnight when the NYSE is closed. EURUSD stays EURUSD at the\n  terminal, and the stop keeps its pips instead of rounding to a cent.\n  A forex position stays open until Friday 21:55 UTC. A REAL account still\n  places nothing until live auto is armed. FLATTEN ALL still closes everything."
 }
