@@ -1,12 +1,12 @@
 {
   "name": "Day Trader Bot",
-  "version": "2.5.3",
-  "published": "2026-10-28",
+  "version": "2.5.4",
+  "published": "2026-10-29",
   "installer": {
-    "url": "https://github.com/positivesooch/day-alpha/releases/download/v2.5.3/DayTraderBot-Setup-2.5.3.exe",
-    "file": "DayTraderBot-Setup-2.5.3.exe",
-    "sha256": "84be75c271bb06f046fe9d63b674d26b31676f20b2dc0971b864c2fbd2785112",
-    "size": 18664717
+    "url": "https://github.com/positivesooch/day-alpha/releases/download/v2.5.4/DayTraderBot-Setup-2.5.4.exe",
+    "file": "DayTraderBot-Setup-2.5.4.exe",
+    "sha256": "21267c4e3b3951ad35cc1c61ee5d6202eeee0e02c27adc71c48f5b3f53e15a0b",
+    "size": 18663846
   },
-  "notes": "- Forex on MetaTrader 5. While forex is open (Sunday 22:00 UTC through\n  Friday 22:00 UTC) the bot can buy a pair that breaks the prior hour,\n  including overnight when the NYSE is closed. EURUSD stays EURUSD at the\n  terminal, and the stop keeps its pips instead of rounding to a cent.\n  A forex position stays open until Friday 21:55 UTC. A REAL account still\n  places nothing until live auto is armed. FLATTEN ALL still closes everything."
+  "notes": "- A forex trade can open after the New York close. The stock flat-by of\n  15:55 no longer refuses the plan, and the bot reads five days of bars so\n  the prior hour is still there after midnight UTC. The position stays\n  on its stop and target until Friday 21:55 UTC. FLATTEN ALL still closes\n  everything."
 }
