@@ -614,6 +614,10 @@ class Forex(unittest.TestCase):
         self.assertEqual(r["status"], "waiting")
         self.assertIn("under the prior", r["reason"])
 
+    def test_a_live_forex_check_asks_for_five_days(self):
+        self.assertEqual(entry._chart_span(type("A", (), {"setup": "fx"})()), "5d")
+        self.assertIsNone(entry._chart_span(type("A", (), {"setup": "orb"})()))
+
 
 class SkillDoc(unittest.TestCase):
     def test_skill_md(self):

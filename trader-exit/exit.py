@@ -599,7 +599,11 @@ def build_plan(a, now_utc):
         tick = Decimal("0.001") if D(info["entry"]) >= 20 else Decimal("0.00001")
     c = compute(info["entry"], stop_rule, stop_param, target_rule, target_param, info["or_high"], info["or_low"],
                 atr, atr_n, tick)
-    flat_by, flat_note = resolve_flat_by(day, a.flat_by, cfg, entry_time)
+    if info["setup"] == "fx":
+        # The stock flat-by is 15:55 New York. Forex keeps its bracket until Friday 21:55 UTC.
+        flat_by, flat_note = "21:55", "forex holds until Friday 21:55 UTC; the 15:55 New York stock flat does not apply"
+    else:
+        flat_by, flat_note = resolve_flat_by(day, a.flat_by, cfg, entry_time)
     orr = None
     if info["or_high"] is not None and info["or_low"] is not None:
         orr = {"high": float(cents(info["or_high"], tick)), "low": float(cents(info["or_low"], tick)),
@@ -650,7 +654,10 @@ def describe(plan):
     out.append("  Target        %s  %s" % (money(plan["target"]), plan["target_label"]))
     out.append("  Risk a share  %s (%s%% of the entry)" % (money(plan["risk_per_share"]), pct))
     out.append("  Reward:risk   %s" % ratio(plan["reward_risk"]))
-    out.append("  Flat by       %s ET, win or lose: no overnight hold" % plan["flat_by"])
+    if plan.get("setup") == "fx":
+        out.append("  Flat by       Friday 21:55 UTC: the bracket stays on, the stock close does not apply")
+    else:
+        out.append("  Flat by       %s ET, win or lose: no overnight hold" % plan["flat_by"])
     out.append("Set before the entry. If price hits the stop, you are out; never move it further away.")
     out.append(NOTE)
     return out

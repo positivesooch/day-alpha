@@ -1,6 +1,6 @@
 ; Inno Setup 6 script for Day Trader Bot.
 ;
-;   ISCC.exe /DMyAppVersion=2.5.3 installer\DayTraderBot.iss
+;   ISCC.exe /DMyAppVersion=2.5.4 installer\DayTraderBot.iss
 ;
 ; Expects the PyInstaller output in dist\DayTraderBot\ (see build.ps1).
 ; Writes installer\Output\DayTraderBot-Setup-<version>.exe.
@@ -13,7 +13,7 @@
 ; the uninstaller leaves it alone.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "2.5.3"
+  #define MyAppVersion "2.5.4"
 #endif
 #define MyAppName "Day Trader Bot"
 #define MyAppPublisher "Day Trader skill"

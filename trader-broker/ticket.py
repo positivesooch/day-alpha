@@ -183,7 +183,13 @@ def _money(v):
 
 
 def _p(v):
-    return "%.2f" % float(v)
+    """A price. Stocks stay in cents. A forex price under 20 keeps 5 decimals."""
+    x = float(v)
+    if abs(x) >= 20:
+        return "%.3f" % x if abs(x - round(x, 2)) >= 5e-4 else "%.2f" % x
+    if abs(x - round(x, 2)) < 5e-7:
+        return "%.2f" % x
+    return "%.5f" % x
 
 
 def is_bracket(order):

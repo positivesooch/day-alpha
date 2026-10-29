@@ -354,8 +354,11 @@ def offline_file(path, sym):
     return path
 
 
-def get_chart(sym, interval, day=None, offline=None, today=None):
-    """Bars for one ticker, from Yahoo (range=1d for today) or a saved file."""
+def get_chart(sym, interval, day=None, offline=None, today=None, span=None):
+    """Bars for one ticker, from Yahoo (range=1d for today) or a saved file.
+
+    A forex check passes span='5d'. range=1d after midnight UTC does not hold
+    the prior 60 minutes, so the breakout would never see its level."""
     sym = sym.upper()
     if offline:
         f = offline_file(offline, sym)
@@ -365,7 +368,7 @@ def get_chart(sym, interval, day=None, offline=None, today=None):
             raise EntryError("could not read %s: %s" % (f, e))
     else:
         today = today or to_eastern(utc_now()).date()
-        text = yahoo_get(chart_path(sym, chart_range(day or today, today, interval), interval))
+        text = yahoo_get(chart_path(sym, span or chart_range(day or today, today, interval), interval))
     ch = parse_chart(text, sym)
     if ch["symbol"] != yahoo_symbol(sym):
         raise EntryError("the chart file holds %s, not %s" % (ch["symbol"], sym))
@@ -868,14 +871,20 @@ def _opts(a, cfg):
             "min_volume_x": a.min_volume_x, "cfg": cfg}
 
 
+def _chart_span(a):
+    """Forex needs the prior hour, which range=1d drops at midnight UTC."""
+    return "5d" if getattr(a, "setup", None) == "fx" else None
+
+
 def _load(a, sym, now):
     """(chart, now). An offline file without --now is read as of its own time."""
     real_today = to_eastern(utc_now()).date()
+    span = _chart_span(a)
     if a.offline and now is None:
-        ch = get_chart(sym, a.interval, offline=a.offline)
+        ch = get_chart(sym, a.interval, offline=a.offline, span=span)
         return ch, (utc_of(ch["data_time"]) if ch.get("data_time") else utc_now())
     now = now or utc_now()
-    return get_chart(sym, a.interval, to_eastern(now).date(), a.offline, real_today), now
+    return get_chart(sym, a.interval, to_eastern(now).date(), a.offline, real_today, span), now
 
 
 def cmd_check(a):
@@ -913,7 +922,7 @@ def cmd_watch(a):
     real_today = to_eastern(utc_now()).date()
 
     def provider(now):
-        return get_chart(sym, a.interval, to_eastern(now).date(), a.offline, real_today)
+        return get_chart(sym, a.interval, to_eastern(now).date(), a.offline, real_today, _chart_span(a))
 
     until = None
     if a.until:

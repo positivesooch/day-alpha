@@ -276,6 +276,18 @@ class Cli(unittest.TestCase):
         self.assertAlmostEqual(plan["entry"], 1.089, places=5)
         self.assertAlmostEqual(plan["target"], 1.094, places=5)
         self.assertGreater(abs(plan["stop"] - round(plan["stop"], 2)), 0.001)
+        self.assertEqual(plan["flat_by"], "21:55")
+
+    def test_a_forex_plan_is_allowed_after_the_stock_close(self):
+        code, out, err = run(exitp, ["plan", "--symbol", "USDCHF", "--entry", "0.82965",
+                                     "--or-high", "0.82945", "--or-low", "0.82735", "--setup", "fx",
+                                     "--stop", "or-low", "--target", "1R", "--time", "8:30 PM",
+                                     "--date", "2026-10-28", "--json", "--now", "2026-10-28 20:31"])
+        self.assertEqual(code, 0, err)
+        plan = json.loads(out)
+        self.assertEqual(plan["flat_by"], "21:55")
+        self.assertAlmostEqual(plan["stop"], 0.82735, places=5)
+        self.assertAlmostEqual(plan["target"], 0.83195, places=5)
 
     def test_show_without_a_plan(self):
         code, text, _ = run(exitp, ["show"])

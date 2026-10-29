@@ -39,7 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.5.3"
+VERSION = "2.5.4"
 
 # Frozen (the Windows build made by installer/DayTraderBot.spec): the pack's
 # folders are bundled under <bundle>/pack, and the exe itself is the Python
@@ -452,6 +452,14 @@ def quote(x):
     return "$%.5f" % v
 
 
+def round_fill(price, symbol=None):
+    """A sim fill. Stocks stay in cents. Forex keeps pips (5 decimals, 3 for yen)."""
+    v = float(price)
+    if symbol and markets.is_forex(symbol):
+        return round(v, 3) if abs(v) >= 20 else round(v, 5)
+    return round(v, 2)
+
+
 # ---------------------------------------------------------------- bars
 
 def parse_chart(doc):
@@ -702,7 +710,7 @@ class SimBroker(object):
             raise BotError("no price to fill %s" % order["symbol"])
         self.n += 1
         return {"broker_id": "sim-%d" % self.n, "filled_qty": int(float(order["qty"])),
-                "filled_price": round(price, 2), "at": now}
+                "filled_price": round_fill(price, order.get("symbol")), "at": now}
 
     def watch(self, pos, now):
         closed, _ = self.bars.bars(pos["symbol"], now, fresh=True)
@@ -1464,8 +1472,8 @@ class Bot(object):
         for note in fill.get("notes") or []:
             self.log("%s: %s" % (sym, note))
         self.log("%s: FILLED buy %d at %s (%s), bracket at the broker: stop-loss %s, take-profit %s%s" % (
-            sym, fill["filled_qty"], money(fill["filled_price"]), fill["broker_id"], money(pos["stop"]),
-            money(pos["target"]), " [%s lots of %s]" % (fill["lots"], fill["mt5_symbol"]) if fill.get("lots") else ""))
+            sym, fill["filled_qty"], quote(fill["filled_price"]), fill["broker_id"], quote(pos["stop"]),
+            quote(pos["target"]), " [%s lots of %s]" % (fill["lots"], fill["mt5_symbol"]) if fill.get("lots") else ""))
 
     def ask(self, sym, c, ticket):
         code, text, err = self.tool.run("ticket", ["show", "--index", "1"], want_json=False)

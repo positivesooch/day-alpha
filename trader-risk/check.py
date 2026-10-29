@@ -301,7 +301,13 @@ def _cent(x):
 
 
 def _p(x):
-    return "%.2f" % float(x)
+    """A price. Stocks stay in cents. A forex price under 20 keeps 5 decimals."""
+    v = float(x)
+    if abs(v) >= 20:
+        return "%.3f" % v if abs(v - round(v, 2)) >= 5e-4 else "%.2f" % v
+    if abs(v - round(v, 2)) < 5e-7:
+        return "%.2f" % v
+    return "%.5f" % v
 
 
 def account(cfg, portfolio, prices):

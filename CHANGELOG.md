@@ -4,6 +4,14 @@ The installed app reads the newest entry's notes from `releases/latest.json`
 and shows them next to its "Update to ..." button. Keep the newest version at
 the top, one `## <version> (<date>)` heading per release.
 
+## 2.5.4 (2026-10-29)
+
+- A forex trade can open after the New York close. The stock flat-by of
+  15:55 no longer refuses the plan, and the bot reads five days of bars so
+  the prior hour is still there after midnight UTC. The position stays
+  on its stop and target until Friday 21:55 UTC. FLATTEN ALL still closes
+  everything.
+
 ## 2.5.3 (2026-10-27)
 
 - Forex on MetaTrader 5. While forex is open (Sunday 22:00 UTC through
